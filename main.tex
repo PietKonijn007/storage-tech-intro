@@ -1,0 +1,450 @@
+%% =============================================================================
+%% Foundations of Storage & Data Management
+%% A Comprehensive Technical Reference
+%% =============================================================================
+\documentclass[10pt,twoside,openright]{book}
+
+%% ---------------------------------------------------------------------------
+%% Page geometry — dense A4
+%% ---------------------------------------------------------------------------
+\usepackage[
+  a4paper,
+  inner=20mm,
+  outer=18mm,
+  top=18mm,
+  bottom=18mm,
+  headheight=12pt,
+  headsep=8pt,
+  footskip=10mm
+]{geometry}
+
+%% ---------------------------------------------------------------------------
+%% Encoding and fonts
+%% ---------------------------------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[activate={true,nocompatibility},tracking=true,kerning=true,spacing=true,stretch=10,shrink=10]{microtype}
+\usepackage{textcomp}
+\usepackage{setspace}
+\setstretch{0.95}          % slightly tighter line spacing
+
+%% ---------------------------------------------------------------------------
+%% Language
+%% ---------------------------------------------------------------------------
+\usepackage[english]{babel}
+
+%% ---------------------------------------------------------------------------
+%% Colours
+%% ---------------------------------------------------------------------------
+\usepackage[dvipsnames,svgnames,x11names]{xcolor}
+
+% Primary palette
+\definecolor{chapterblue}{HTML}{1B3A5C}   % Deep navy for titles
+\definecolor{sectionblue}{HTML}{2C5F8A}   % Medium blue for sections
+\definecolor{accentblue}{HTML}{3B82C4}    % Lighter accent
+\definecolor{keyconceptbg}{HTML}{E8F0F8}  % Light blue background
+\definecolor{securityred}{HTML}{8B1A1A}   % Dark red for security sections
+\definecolor{securitybg}{HTML}{FDF0EF}    % Light red background
+\definecolor{notebg}{HTML}{FFFBE6}        % Light yellow for notes
+\definecolor{noteborder}{HTML}{D4A017}    % Golden border
+\definecolor{codebg}{HTML}{F5F5F0}        % Code background
+\definecolor{darkgray}{HTML}{333333}
+\definecolor{midgray}{HTML}{666666}
+\definecolor{lightgray}{HTML}{CCCCCC}
+\definecolor{partgold}{HTML}{B8860B}      % Dark goldenrod for part pages
+
+%% ---------------------------------------------------------------------------
+%% Graphics and floats
+%% ---------------------------------------------------------------------------
+\usepackage{graphicx}
+\usepackage{float}
+% \usepackage{wrapfig}  % not available
+\usepackage{caption}
+\usepackage{subcaption}
+\captionsetup{
+  font={footnotesize,sf},
+  labelfont={bf,color=sectionblue},
+  format=hang,
+  margin=8pt,
+  aboveskip=4pt,
+  belowskip=2pt
+}
+
+%% ---------------------------------------------------------------------------
+%% Tables
+%% ---------------------------------------------------------------------------
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{colortbl}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+
+%% ---------------------------------------------------------------------------
+%% Lists
+%% ---------------------------------------------------------------------------
+\usepackage{enumitem}
+\setlist{nosep, topsep=1pt, partopsep=0pt, parsep=0pt, itemsep=1pt, leftmargin=1.3em}
+\setlist[itemize]{label=\textcolor{accentblue}{\textbullet}}
+\setlist[enumerate]{label=\textcolor{accentblue}{\arabic*.}}
+\setlist[description]{font=\sffamily\bfseries\color{sectionblue}, itemsep=2pt}
+
+%% ---------------------------------------------------------------------------
+%% Math (for formulas, if needed)
+%% ---------------------------------------------------------------------------
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{calc}
+\providecommand{\real}[1]{#1}  % pandoc table column width multiplier
+
+%% ---------------------------------------------------------------------------
+%% Code listings
+%% ---------------------------------------------------------------------------
+\usepackage{listings}
+\lstset{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{lightgray},
+  framesep=4pt,
+  xleftmargin=6pt,
+  xrightmargin=6pt,
+  aboveskip=4pt,
+  belowskip=4pt,
+  numbers=none,
+  tabsize=4,
+  showstringspaces=false,
+  keywordstyle=\bfseries\color{chapterblue},
+  commentstyle=\itshape\color{midgray},
+  stringstyle=\color{securityred},
+}
+
+%% ---------------------------------------------------------------------------
+%% Boxes for key concepts, security, and notes
+%% ---------------------------------------------------------------------------
+\usepackage[most]{tcolorbox}  % using patched local copy in texmf/
+
+% Key Concept box — compact
+\newtcolorbox{keyconcept}[1][]{%
+  enhanced,
+  breakable,
+  colback=keyconceptbg,
+  colframe=accentblue,
+  coltitle=white,
+  fonttitle=\sffamily\bfseries\small,
+  title={\footnotesize KEY CONCEPT},
+  boxrule=0.4pt,
+  left=6pt, right=6pt, top=3pt, bottom=3pt,
+  arc=1.5pt,
+  leftrule=3pt, rightrule=0.4pt, toprule=0.4pt, bottomrule=0.4pt,
+  before skip=4pt, after skip=4pt,
+  #1
+}
+
+% Security \& Governance box — compact
+\newtcolorbox{securitybox}[1][]{%
+  enhanced,
+  breakable,
+  colback=securitybg,
+  colframe=securityred,
+  coltitle=white,
+  fonttitle=\sffamily\bfseries\small,
+  title={\footnotesize\textsf{\textbf{!}} \ SECURITY \& GOVERNANCE},
+  boxrule=0.4pt,
+  left=6pt, right=6pt, top=3pt, bottom=3pt,
+  arc=1.5pt,
+  leftrule=3pt, rightrule=0.4pt, toprule=0.4pt, bottomrule=0.4pt,
+  before skip=4pt, after skip=4pt,
+  #1
+}
+
+% Note box — compact
+\newtcolorbox{notebox}[1][]{%
+  enhanced,
+  breakable,
+  colback=notebg,
+  colframe=noteborder,
+  fonttitle=\sffamily\bfseries\footnotesize,
+  title={NOTE},
+  boxrule=0.4pt,
+  left=6pt, right=6pt, top=3pt, bottom=3pt,
+  arc=1.5pt,
+  leftrule=3pt,
+  before skip=4pt, after skip=4pt,
+  #1
+}
+
+% Definition box — compact
+\newtcolorbox{defbox}{%
+  enhanced,
+  colback=keyconceptbg,
+  colframe=accentblue,
+  boxrule=0pt, leftrule=2.5pt,
+  left=6pt, right=6pt, top=3pt, bottom=3pt,
+  arc=0pt,
+  breakable,
+  before skip=3pt, after skip=3pt,
+}
+
+%% ---------------------------------------------------------------------------
+%% Headers and footers
+%% ---------------------------------------------------------------------------
+\usepackage{fancyhdr}
+
+\fancypagestyle{plain}{%
+  \fancyhf{}
+  \fancyfoot[C]{\small\thepage}
+  \renewcommand{\headrulewidth}{0pt}
+  \renewcommand{\footrulewidth}{0pt}
+}
+
+\fancypagestyle{mainmatter}{%
+  \fancyhf{}
+  \fancyhead[LE]{\footnotesize\textcolor{midgray}{\textsf{\leftmark}}}
+  \fancyhead[RO]{\footnotesize\textcolor{midgray}{\textsf{\rightmark}}}
+  \fancyfoot[LE,RO]{\footnotesize\textcolor{midgray}{\thepage}}
+  \fancyfoot[RE,LO]{}
+  \renewcommand{\headrulewidth}{0.4pt}
+  \renewcommand{\footrulewidth}{0pt}
+  \renewcommand{\headrule}{\hbox to\headwidth{%
+    \color{lightgray}\leaders\hrule height \headrulewidth\hfill}}
+}
+
+\pagestyle{mainmatter}
+
+%% ---------------------------------------------------------------------------
+%% Chapter, section, and part styling (titlesec)
+%% ---------------------------------------------------------------------------
+\usepackage{titlesec}
+
+% Part styling — compact
+\titleformat{\part}[display]
+  {\centering\LARGE\bfseries\sffamily\color{chapterblue}}
+  {\textcolor{partgold}{\rule{2cm}{1.5pt}}\\\vspace{4pt}%
+   \textcolor{partgold}{\fontsize{12}{14}\selectfont PART \thepart}\\%
+   \textcolor{partgold}{\rule{2cm}{1.5pt}}}
+  {14pt}
+  {\fontsize{22}{26}\selectfont}
+\titlespacing*{\part}{0pt}{40pt}{30pt}
+
+% Chapter styling — compact
+\titleformat{\chapter}[display]
+  {\normalfont\sffamily}
+  {\textcolor{lightgray}{\rule{\textwidth}{0.8pt}}\\[-6pt]%
+   \flushright\fontsize{42}{42}\selectfont\textcolor{lightgray}{\thechapter}}
+  {-12pt}
+  {\filright\fontsize{17}{21}\selectfont\bfseries\color{chapterblue}}
+  [\vspace{1pt}\textcolor{accentblue}{\rule{\textwidth}{0.4pt}}]
+\titlespacing*{\chapter}{0pt}{10pt}{12pt}
+
+% Section styling — compact
+\titleformat{\section}
+  {\normalsize\bfseries\sffamily\color{sectionblue}}
+  {\thesection}{0.6em}{}
+  [\vspace{-4pt}\textcolor{accentblue}{\rule{2.5cm}{0.3pt}}]
+\titlespacing*{\section}{0pt}{10pt plus 3pt minus 2pt}{3pt plus 1pt minus 1pt}
+
+% Subsection styling — compact
+\titleformat{\subsection}
+  {\normalsize\bfseries\sffamily\color{darkgray}}
+  {\thesubsection}{0.6em}{}
+\titlespacing*{\subsection}{0pt}{8pt plus 2pt minus 1pt}{2pt plus 1pt minus 1pt}
+
+% Subsubsection styling — compact
+\titleformat{\subsubsection}
+  {\small\bfseries\sffamily\color{midgray}}
+  {\thesubsubsection}{0.5em}{}
+\titlespacing*{\subsubsection}{0pt}{6pt plus 1pt minus 1pt}{1pt plus 1pt}
+
+%% ---------------------------------------------------------------------------
+%% Table of contents styling
+%% ---------------------------------------------------------------------------
+\usepackage{titletoc}
+\usepackage{tocloft}
+
+\renewcommand{\cftpartfont}{\normalsize\bfseries\sffamily\color{chapterblue}}
+\renewcommand{\cftchapfont}{\small\bfseries\sffamily\color{sectionblue}}
+\renewcommand{\cftsecfont}{\small\sffamily\color{darkgray}}
+\renewcommand{\cftsubsecfont}{\footnotesize\sffamily\color{midgray}}
+\renewcommand{\cftchapleader}{\cftdotfill{\cftdotsep}}
+\renewcommand{\cftchappagefont}{\small\bfseries\color{sectionblue}}
+\setlength{\cftbeforechapskip}{3pt}
+\setlength{\cftbeforesecskip}{0.5pt}
+\setlength{\cftbeforesubsecskip}{0pt}
+
+%% ---------------------------------------------------------------------------
+%% Hyperlinks
+%% ---------------------------------------------------------------------------
+\usepackage[
+  colorlinks=true,
+  linkcolor=sectionblue,
+  citecolor=sectionblue,
+  urlcolor=accentblue,
+  bookmarks=true,
+  bookmarksnumbered=true,
+  bookmarksopen=true,
+  bookmarksopenlevel=1,
+  pdftitle={Foundations of Storage and Data Management},
+  pdfauthor={},
+  pdfsubject={Storage Architecture, Security and Governance},
+]{hyperref}
+
+%% ---------------------------------------------------------------------------
+%% Misc
+%% ---------------------------------------------------------------------------
+\usepackage{bookmark}
+% \usepackage{emptypage}   % not available
+% \usepackage{csquotes}    % not available
+\usepackage{parskip}       % paragraph spacing instead of indent
+\setlength{\parskip}{2pt plus 1pt minus 0.5pt}
+\setlength{\parindent}{0pt}
+
+% Fix for Unicode chars that may appear
+\DeclareUnicodeCharacter{2212}{--}   % minus sign
+\DeclareUnicodeCharacter{2019}{'}    % right single quote
+\DeclareUnicodeCharacter{201C}{``}   % left double quote
+\DeclareUnicodeCharacter{201D}{''}   % right double quote
+\DeclareUnicodeCharacter{2013}{--}   % en-dash
+\DeclareUnicodeCharacter{2014}{---}  % em-dash
+\DeclareUnicodeCharacter{00B2}{$^2$} % superscript 2
+\DeclareUnicodeCharacter{00B3}{$^3$} % superscript 3
+\DeclareUnicodeCharacter{2070}{$^0$}
+\DeclareUnicodeCharacter{00B9}{$^1$}
+\DeclareUnicodeCharacter{2074}{$^4$}
+\DeclareUnicodeCharacter{2075}{$^5$}
+\DeclareUnicodeCharacter{2076}{$^6$}
+\DeclareUnicodeCharacter{2077}{$^7$}
+\DeclareUnicodeCharacter{2078}{$^8$}
+\DeclareUnicodeCharacter{2079}{$^9$}
+\DeclareUnicodeCharacter{207B}{$^-$}
+\DeclareUnicodeCharacter{2081}{$_1$}
+\DeclareUnicodeCharacter{2082}{$_2$}
+\DeclareUnicodeCharacter{2083}{$_3$}
+\DeclareUnicodeCharacter{2084}{$_4$}
+\DeclareUnicodeCharacter{2085}{$_5$}
+\DeclareUnicodeCharacter{00D7}{$\times$}
+\DeclareUnicodeCharacter{2265}{$\geq$}
+\DeclareUnicodeCharacter{2264}{$\leq$}
+\DeclareUnicodeCharacter{2248}{$\approx$}
+\DeclareUnicodeCharacter{00B5}{$\mu$}
+\DeclareUnicodeCharacter{03BC}{$\mu$}
+
+
+%% ===========================================================================
+%% DOCUMENT
+%% ===========================================================================
+\begin{document}
+
+%% ---------------------------------------------------------------------------
+%% Front matter
+%% ---------------------------------------------------------------------------
+\frontmatter
+\pagestyle{plain}
+
+% Title page
+\begin{titlepage}
+\begin{center}
+\vspace*{1.5cm}
+
+{\textcolor{accentblue}{\rule{8cm}{1.5pt}}}
+
+\vspace{0.8cm}
+
+{\fontsize{32}{38}\selectfont\bfseries\sffamily\textcolor{chapterblue}{Foundations of\\[6pt] Storage \&\\[6pt] Data Management}}
+
+\vspace{0.6cm}
+
+{\textcolor{accentblue}{\rule{8cm}{1.5pt}}}
+
+\vspace{1cm}
+
+{\Large\sffamily\textcolor{midgray}{Architecture, Security \& Governance}}
+
+\vspace{0.5cm}
+
+{\large\sffamily\textcolor{midgray}{A Comprehensive Technical Reference}}
+
+\vspace{2cm}
+
+{\large\sffamily\textcolor{darkgray}{18 Chapters across 6 Parts}}
+
+\vspace{0.3cm}
+
+{\normalsize\sffamily\textcolor{midgray}{With Integrated Security and Governance}}
+
+\vspace{\fill}
+
+{\normalsize\sffamily\textcolor{midgray}{March 2026}}
+
+\end{center}
+\end{titlepage}
+
+\cleardoublepage
+
+% Copyright / colophon page
+\thispagestyle{empty}
+\vspace*{\fill}
+\begin{center}
+\small\sffamily\textcolor{midgray}{%
+\textit{Foundations of Storage \& Data Management}\\[4pt]
+Architecture, Security \& Governance\\[12pt]
+First Edition --- March 2026\\[24pt]
+Typeset in \LaTeX\\[4pt]
+}
+\end{center}
+\vspace*{\fill}
+\cleardoublepage
+
+% Table of contents
+\tableofcontents
+\cleardoublepage
+
+%% ---------------------------------------------------------------------------
+%% Main matter
+%% ---------------------------------------------------------------------------
+\mainmatter
+\pagestyle{mainmatter}
+
+%% Part I — Storage Fundamentals
+\input{chapters/chapter01}   % Ch 1:  Block Devices and the Linux Storage Stack
+\input{chapters/chapter02}   % Ch 2:  Partitioning, LUNs, and Logical Volume Management
+\input{chapters/chapter03}   % Ch 3:  Filesystems — Architecture and Trade-offs
+\input{chapters/chapter04}   % Ch 4:  Mounting, Namespaces, and Access Semantics
+
+%% Part II — Aggregating Storage: From Disks to Arrays
+\input{chapters/chapter05}   % Ch 5:  RAID — Principles, Levels, and Implementation
+\input{chapters/chapter06}   % Ch 6:  Storage Networking — SAN, NAS, and Protocols
+\input{chapters/chapter07}   % Ch 7:  Software-Defined Storage and Distributed Block Storage
+
+%% Part III — Parallel and High-Performance Filesystems
+\input{chapters/chapter08}   % Ch 8:  Parallel Filesystems — Architecture and Use Cases
+\input{chapters/chapter09}   % Ch 9:  Object Storage — Principles and Architecture
+
+%% Part IV — Data Management and Data Services
+\input{chapters/chapter10}   % Ch 10: Snapshots, Clones, and Copy Data Management
+\input{chapters/chapter11}   % Ch 11: Replication, Backup, and Disaster Recovery
+\input{chapters/chapter12}   % Ch 12: Data Tiering, Caching, and Data Lifecycle
+\input{chapters/chapter13}   % Ch 13: Data Reduction — Dedup, Compression, Compaction
+
+%% Part V — Modern Storage Architectures
+\input{chapters/chapter14}   % Ch 14: Unified/Multiprotocol Storage — ONTAP Case Study
+\input{chapters/chapter15}   % Ch 15: Cloud-Native and Kubernetes Storage
+\input{chapters/chapter16}   % Ch 16: Data Fabric and Hybrid/Multi-Cloud
+
+%% Part VI — Performance, Observability, and AI Infrastructure
+\input{chapters/chapter17}   % Ch 17: Storage Performance — Metrics, Profiling, Tuning
+\input{chapters/chapter18}   % Ch 18: Storage for AI/ML Workloads
+
+%% ---------------------------------------------------------------------------
+%% Back matter — Appendices
+%% ---------------------------------------------------------------------------
+\backmatter
+
+\appendix
+\input{chapters/appendixA}   % Command Reference
+\input{chapters/appendixB}   % Glossary
+
+\end{document}

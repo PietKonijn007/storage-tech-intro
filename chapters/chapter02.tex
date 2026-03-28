@@ -1,0 +1,323 @@
+\chapter{Partitioning, LUNs, and Logical Volume Management}
+\label{ch:2}
+
+Volume management is the layer of the storage stack that sits between raw physical storage devices and the filesystems or applications that consume them. Its responsibilities are to present storage in a form that applications and filesystems can use, to abstract the physical characteristics of the underlying media, to provide resilience through redundancy, and to enable operational flexibility --- resizing, snapshot, thin provisioning, and multipath access --- without modifying filesystems or applications. This chapter covers the partitioning schemes that structure individual disks, the logical volume management frameworks on Linux and Windows that pool and virtualize storage, software RAID implementations, the device mapper architecture that underlies most Linux storage abstraction, and multipath I/O for highly available storage connectivity.
+
+\section{Partition Schemes: MBR and GPT}
+Partitioning is the process of dividing a physical storage device into one or more logical regions, each independently usable as a block device by the operating system. The partition table, stored on the device, describes the boundaries and types of each partition. Two partition table formats are in widespread use: the Master Boot Record (MBR) scheme and the GUID Partition Table (GPT) scheme that superseded it.
+
+\section{Master Boot Record (MBR)}
+The MBR is an industry standard dating to 1983. The MBR occupies the first 512-byte sector of a disk (LBA 0). Its layout is:
+
+\begin{itemize}
+  \item • Bytes 0--445: Bootstrap code (the initial boot loader, executed by the system firmware on BIOS platforms)
+  \item Bytes 446--461: Partition entry 1 (16 bytes)
+  \item Bytes 462--477: Partition entry 2
+  \item Bytes 478--493: Partition entry 3
+  \item Bytes 494--509: Partition entry 4
+  \item Bytes 510--511: Boot signature (0x55AA)
+\end{itemize}
+
+Each 16-byte partition entry contains a status byte (bootable flag), the CHS (Cylinder-Head-Sector) start address, partition type code, CHS end address, LBA start sector (4 bytes), and LBA partition size (4 bytes). The 4-byte LBA start and size fields limit MBR partitions to addressing 2\^{}32 sectors --- 2 TiB with 512-byte sectors, or 8 TiB with 4K native sectors (4Kn drives). This was an impractical limit in 1983 but is now a hard barrier for modern large-capacity drives.
+
+\textbf{Extended and logical partitions}: MBR supports only four primary partitions. To work around this, one primary partition can be designated an extended partition, which acts as a container for a linked list of logical partitions. An extended partition contains a chain of Extended Boot Records (EBRs), each describing one logical partition and pointing to the next EBR. While this provides more than four partitions, the linked-list structure is fragile and subject to corruption propagation. Modern deployments should use GPT, but MBR compatibility remains relevant for legacy systems, older hypervisors, and firmware update environments.
+
+\section{GUID Partition Table (GPT)}
+GPT was defined as part of the UEFI specification and replaces MBR for all modern systems. GPT addresses MBR's fundamental limitations:
+
+\begin{itemize}
+  \item • \textbf{64-bit LBA addressing}: Supports disks up to 2\^{}64 sectors --- approximately 9.4 ZB with 512-byte sectors, effectively unlimited for foreseeable hardware.
+  \item \textbf{Up to 128 partition entries} by default (the specification allows more, and partition tools can create tables with any count).
+  \item \textbf{Globally Unique Identifiers (GUIDs)}: Each partition has a unique GUID and a partition type GUID, avoiding the ambiguity of MBR's one-byte type codes.
+  \item \textbf{Header and partition table redundancy}: GPT stores a primary header at LBA 1 and a backup header at the last LBA. The partition table entries are stored after the primary header and also mirrored before the backup header. Either copy can be used to reconstruct the other.
+  \item \textbf{Header CRC32 checksums}: Both the header and the partition table entries are protected by CRC32 checksums. Tools like gdisk can detect and repair corruption.
+\end{itemize}
+
+The Protective MBR at LBA 0 contains a single MBR partition entry of type 0xEE spanning the entire disk, informing legacy MBR tools that the disk is in use and should not be repartitioned.
+
+\textbf{Partition attributes}: GPT partition entries include a 64-bit attribute flags field. Bit 2 is the "required partition" flag (set for EFI system partitions and other critical system partitions). Bits 48--63 are partition-type-specific; for Windows NTFS/ReFS partitions, specific bits control No Auto Automount and Read Only policies.
+
+\textbf{Alignment considerations}: Partitions should be aligned to erase block boundaries for SSDs and to RAID stripe boundaries for array-backed volumes. The standard recommendation is 1 MiB alignment for all partitions, which satisfies the alignment requirements for virtually all current and historical media (NAND erase blocks up to 256 KB, RAID stripes up to 512 KB). Misaligned partitions result in read-modify-write operations for every write I/O, reducing SSD endurance and performance.
+
+\section{UEFI Boot Considerations}
+On UEFI systems, the boot process requires an EFI System Partition (ESP), a GPT partition of type GUID C12A7328-F81F-11D2-BA4B-00A0C93EC93B, formatted as FAT32. The ESP contains UEFI bootloaders (EFI executables, stored in paths like /EFI/ubuntu/grubx64.efi), device drivers, and utilities that the UEFI firmware can load directly. The UEFI firmware maintains a boot variable list (stored in NVRAM) of candidate boot entries, each pointing to a specific EFI executable on the ESP.
+
+The ESP is typically 100--500 MB in size and should be unencrypted and accessible to the UEFI firmware before any OS encryption layer is active. Multiple operating systems share a single ESP, with each OS's bootloader in its own EFI subdirectory.
+
+\section{Logical Volume Management (LVM)}
+LVM is the standard storage abstraction layer on Linux, providing a flexible mapping between physical storage and the logical block devices that filesystems and applications use. LVM was originally developed for HP-UX and later ported to Linux; the current implementation (LVM2) has been the standard since the early 2000s and integrates tightly with the device mapper framework (discussed later). Understanding LVM's architecture and internals is essential for any Linux storage practitioner.
+
+\section{Physical Volumes, Volume Groups, and Logical Volumes}
+LVM introduces three abstraction layers:
+
+\textbf{Physical Volume (PV)}: A raw block device --- a disk partition, an entire disk, an MD-RAID device, or a SAN LUN --- initialized for use by LVM using pvcreate. The PV header (at the start and end of the device) stores the PV UUID, size, and the UUID of the Volume Group it belongs to. The LVM metadata area stores a human-readable text representation of the Volume Group configuration in a circular buffer of fixed size. Critically, every PV in a Volume Group stores a copy of the full Volume Group configuration, so the VG can be reconstructed from any surviving PV.
+
+\textbf{Volume Group (VG)}: A pool of one or more PVs that LVM treats as a unified resource. The VG is divided into fixed-size units called Physical Extents (PEs), defaulting to 4 MB. All PEs within a VG are the same size. The VG is the allocation domain; LVM assigns PEs to Logical Volumes within the same VG.
+
+\textbf{Logical Volume (LV)}: An allocation of PEs from a VG, presented to the OS as a block device (e.g., /dev/vg0/data). An LV's layout is described by a segment map: a list of segments, where each segment specifies a start PE in the LV, the count of PEs, and their physical location on a specific PV at a specific PE offset. A simple linear LV with a single segment spanning PEs 0--99 on sda is effectively a contiguous partition. An LV that spans multiple PVs or has a complex segment map is assembled transparently by the device mapper target.
+
+The LV segment map types include:
+
+\begin{itemize}
+  \item • \textbf{linear}: Simple mapping, one LV extent to one PE range on one PV.
+  \item \textbf{striped}: LV extents interleaved across multiple PVs, like RAID-0. Provides higher throughput at the cost of reliability (loss of any PV loses the LV).
+  \item \textbf{mirror}: LV extents written to two or more PVs simultaneously, with a log maintained either in-core (risky) or on a dedicated log PV. Now mostly superseded by RAID LVs.
+  \item \textbf{raid} (via dm-raid): LVM can configure RAID-1, RAID-4, RAID-5, RAID-6, RAID-10 LVs using the device mapper's RAID target. These behave like mdadm software RAID sets but are integrated into the LVM layer.
+  \item \textbf{thin} and \textbf{thin-pool}: Thin provisioning, described below.
+  \item \textbf{cache} and \textbf{cache-pool}: LVM caching, attaching a fast device (SSD) as a cache for a slower LV.
+  \item \textbf{vdo}: Virtual Data Optimizer, LVM's integration with Red Hat's inline deduplication and compression engine.
+\end{itemize}
+
+\section{Thin Provisioning}
+Thin provisioning allows LVs to be allocated larger than the physical storage currently backing them, with physical PEs allocated on-demand as writes arrive. This is implemented through the \textbf{thin pool} LV, a special LV containing a metadata device (tracking the mappings between thin LV blocks and pool blocks) and a data device (the pool of actual storage blocks).
+
+The thin pool metadata device stores the block mapping in a B-tree structure. Each thin LV has a device ID within the pool, and the mapping tree records which thin LV data blocks have been provisioned (written to) and where their physical pool blocks are located. Unwritten thin LV blocks return zeros on read, with no physical backing allocated.
+
+Key operational considerations for thin provisioning:
+
+\begin{itemize}
+  \item • \textbf{Thin pool high-water mark}: When a thin pool approaches capacity, new writes will fail for all thin LVs in that pool, potentially causing filesystem corruption. Monitoring thin pool usage and setting auto-extend thresholds (via thin\_pool\_autoextend\_threshold in lvm.conf) is critical in production environments.
+  \item \textbf{Thin LV snapshots}: Snapshots of thin LVs are also thin --- only changed blocks are duplicated. This makes snapshotting extremely efficient. However, unlike traditional LVM snapshots (which have a fixed COW exception store), thin snapshots share the pool's total capacity. Multiple snapshot generations sharing a large thin pool can efficiently represent a long history.
+  \item \textbf{Discard/TRIM pass-through}: When files are deleted inside a thin LV filesystem, the freed blocks can be returned to the thin pool via the TRIM/Discard mechanism (fstrim or discard mount option), allowing other thin LVs to reuse that space.
+\end{itemize}
+
+\section{LVM Snapshot Mechanism}
+LVM's traditional (non-thin) snapshot creates a snapshot LV backed by a fixed-size COW exception store. When a block in the origin LV is about to be overwritten, LVM copies the original block to the exception store before allowing the write. The snapshot LV presents the original data: either from the origin LV (for blocks that have not yet been overwritten) or from the exception store (for blocks that have been overwritten since the snapshot was taken).
+
+Traditional LVM snapshots degrade in read performance as the exception store fills, because reads to overwritten blocks must traverse the exception store. When the exception store fills to 100\%, the snapshot becomes invalid and is automatically deactivated. Sizing the exception store is therefore critical --- too small and it fills quickly; too large and it wastes space. For this reason, thin LVM snapshots are generally preferred for production use.
+
+LVM snapshots are commonly used for application-consistent backup: quiesce the application (or use application-level quiescence with a pre/post hook), take an LVM snapshot, resume the application, then back up from the snapshot. The entire quiesce window is typically less than a second, and the backup of the snapshot volume can proceed at leisure.
+
+\section{LVM Operations: Resize, Move, and Migrate}
+LVM's operational flexibility is one of its primary advantages over static partitions:
+
+\begin{itemize}
+  \item • \textbf{Extending an LV}: lvextend -L +50G /dev/vg0/data adds 50 GB to an existing LV immediately. The filesystem must be extended separately (resize2fs for ext4, xfs\_growfs for XFS --- both support online extension while mounted). ReFS and NTFS can be extended online via Windows Disk Management.
+  \item \textbf{Shrinking an LV}: Requires unmounting the filesystem, shrinking the filesystem first (only supported by ext4 among major Linux filesystems --- XFS does not support shrink), then shrinking the LV. The filesystem must be shrunk before the LV, or data loss occurs.
+  \item \textbf{Moving extents}: pvmove migrates LV extents from one PV to another, enabling replacing a failing drive without service interruption. The migration is online --- LV remains accessible throughout.
+  \item \textbf{Removing a PV from a VG}: By pvmoving all extents off a PV, it can be removed from the VG (vgreduce) and decommissioned. This is the only way to reduce a VG's physical backing --- unlike ZFS pools, LVM does not support removing a PV that still has allocated extents.
+\end{itemize}
+
+\section{Windows Dynamic Disks and Storage Spaces}
+\section{Dynamic Disks}
+Windows dynamic disks are a pre-Storage Spaces Windows mechanism for creating RAID and spanned volumes across multiple physical disks. Dynamic disks use a private region at the end of each disk to store the Logical Disk Manager (LDM) database --- a distributed database replicated across all dynamic disks in the same disk group. The LDM database records volume configurations for all dynamic disks in the group.
+
+Dynamic disks support three volume types:
+
+\begin{itemize}
+  \item • \textbf{Spanned volumes}: Data written sequentially across multiple disks. No redundancy. If any member disk fails, the entire volume is lost. Useful for maximizing capacity across multiple smaller disks.
+  \item \textbf{Striped volumes}: Like RAID-0, data interleaved across member disks in 64 KB stripes. Increased performance, no redundancy.
+  \item \textbf{Mirrored volumes}: RAID-1, two copies of data on two disks. Tolerates one disk failure.
+  \item \textbf{RAID-5 volumes}: Parity RAID across at least three disks. Note that Windows software RAID-5 (dynamic disk) is notorious for poor write performance under load --- the RAID-5 write penalty on the Windows software RAID stack is significant.
+\end{itemize}
+
+Dynamic disks have been deprecated by Microsoft in Windows Server 2016 in favor of Storage Spaces. New deployments should use Storage Spaces. Dynamic disks remain relevant when managing legacy environments or when interoperability with older Windows Server versions is required.
+
+\section{Windows Storage Spaces}
+Storage Spaces is Microsoft's modern software-defined storage solution for Windows Server, introduced in Windows Server 2012. It replaces dynamic disks and introduces a more flexible, scale-out architecture. Storage Spaces Direct (S2D), introduced in Windows Server 2016, extends Storage Spaces to work within HCI clusters using only locally-attached drives.
+
+\section{Architecture of Storage Spaces:}
+Storage Spaces operates through three layers:
+
+\begin{itemize}
+  \item 1. \textbf{Storage Pool}: A collection of physical disks aggregated into a shared pool. Disks in the pool are categorized by type (SSD journal, SSD cache, HDD data) and the pool manages their allocation.
+2. \textbf{Virtual Disks (Spaces)}: Logical volumes created from pool storage with configurable resiliency settings. Virtual disks specify:
+  \item \textbf{Resiliency}: Simple (no redundancy), Two-way mirror, Three-way mirror, or Parity (single or dual parity, analogous to RAID-5/6).
+  \item \textbf{Storage layout}: Interleaving (striping), column count, interleave size.
+  \item \textbf{Provisioning}: Fixed or thin.
+3. \textbf{Physical Disk Slots}: Individual disk management, including hot spare designation, physical disk retirement, and regeneration tracking.
+\end{itemize}
+
+Storage Spaces metadata is stored on the physical disks in the pool using a metadata subsystem. The metadata format changed significantly between Windows Server 2012 and 2016 and is not backward-compatible. Storage Spaces with ReFS (as discussed in Chapter 2) provides the data integrity checking (through ReFS block integrity streams) that NTFS volumes lack.
+
+\textbf{Storage Spaces Direct (S2D)} adds the Storage Bus Layer (SBL), which provides software-defined NVME/SSD caching across the cluster's locally attached NVMe and SSD devices. S2D uses SMB 3.x over RDMA (SMB Direct) for inter-node communication. The storage pool in S2D spans all cluster nodes'{} local drives, with volumes placed with awareness of fault domains (nodes, chassis, racks) to ensure resiliency boundaries.
+
+\section{Software RAID with mdadm}
+The Linux md (multiple device) driver provides software RAID functionality in the kernel. mdadm is the userspace tool for configuring and managing md arrays. Software RAID with mdadm is a mature, production-proven technology that many enterprises use as the block-level redundancy layer beneath LVM and filesystems.
+
+\section{RAID Levels Supported by mdadm}
+\textbf{RAID-0}: Striping without parity. Data is interleaved across member devices in chunk-sized segments (default 512 KB). Total capacity is N $\times$ smallest\_member. No fault tolerance. I/O is distributed across all members, providing N$\times$ throughput improvement for sequential I/O (subject to interconnect limits) and significant improvement for parallel random I/O.
+
+\textbf{RAID-1}: Mirroring. Every write goes to all member devices. Total capacity is one device's worth regardless of member count. Read I/O can be distributed across all members (md distributes reads round-robin or by queue depth). Write throughput is limited to the slowest member. RAID-1 tolerates failure of all but one member. Rebuild from failure reads the surviving member and writes to the replacement --- rebuild time is proportional to array size.
+
+\textbf{RAID-4}: Block-level striping with dedicated parity on one device. Data is striped across N-1 devices, parity stored on one fixed device. The parity device is a write bottleneck for all writes, making RAID-4 rarely used in practice. Relevant primarily as a conceptual stepping stone to RAID-5.
+
+\textbf{RAID-5}: Block-level striping with distributed parity. Parity is rotated across all devices, eliminating the parity disk bottleneck. Total capacity is (N-1) $\times$ smallest\_member. Tolerates one disk failure. Write penalty: every write requires a read of the old data and old parity, followed by writes of the new data and new parity --- four I/Os per write operation (though full-stripe writes avoid the read penalty). RAID-5 rebuild reads all surviving members and writes to the replacement --- with large drives, rebuild can take 12--24+ hours, during which any second failure causes data loss.
+
+\textbf{RAID-6}: Block-level striping with dual distributed parity (using Reed-Solomon or similar coding). Tolerates two simultaneous disk failures. Write penalty increases to six I/Os (two parities must be updated). Total capacity is (N-2) $\times$ smallest\_member. The substantially longer rebuild time for RAID-5 with modern large drives makes RAID-6 effectively mandatory for HDD arrays. With a 16 TB drive requiring 48+ hours to rebuild, the probability of a second failure during rebuild is non-trivial.
+
+\textbf{RAID-10}: Mirroring combined with striping. The canonical md RAID-10 uses a near layout (stripes duplicated on adjacent devices) or far layout (stripes duplicated on distant devices for better read performance at the cost of seek time on spinning disks). RAID-10 is the preferred RAID level for high-performance SSD arrays where the capacity overhead of mirroring is acceptable: no write penalty (unlike RAID-5/6), excellent random I/O performance, and predictable rebuild behavior (only the mirror pair is involved in rebuild, not the entire array).
+
+\section{mdadm Array Management}
+mdadm stores its RAID configuration in a superblock on each member device (mdadm metadata version 1.2 is the current default, with the superblock at 4K from the start of the device, preserving the first 4K for partition tables). The array can self-assemble on boot using these superblocks, even without an /etc/mdadm/mdadm.conf entry.
+
+Key operational concepts:
+
+\textbf{Hot spares}: Disks designated as hot spares (mdadm -\/-add /dev/md0 /dev/sde -\/-spare) wait unused in the array. When a member disk fails, md automatically promotes a hot spare and begins rebuild. Hot spares can be local to a single array or global (available to any degraded array in the system, via spare-group in mdadm.conf).
+
+\textbf{Rebuild priority}: The md driver's sync\_speed\_min and sync\_speed\_max kernel parameters (accessible via /proc/sys/dev/raid/) control how aggressively md uses I/O bandwidth for rebuild operations. In production systems, it is common to set a lower sync\_speed\_min to prevent rebuild I/O from saturating the storage, accepting a longer rebuild window in exchange for minimal impact on applications.
+
+\textbf{Chunk size}: The RAID stripe chunk size (default 512 KB) determines the granularity of data distribution. Smaller chunks improve random I/O distribution but add overhead; larger chunks improve sequential throughput for large sequential writes. For database workloads with 4--16 KB I/O, smaller chunks (128--256 KB) improve parallelism. For streaming workloads with MB-range I/Os, larger chunks (1--2 MB) are appropriate.
+
+\textbf{Read-ahead}: md arrays benefit from tuned read-ahead settings (blockdev -\/-setra) to prefetch data for sequential reads across stripes.
+
+\textbf{Bitmap support}: mdadm supports an internal or external write-intent bitmap --- a persistent log of which portions of the array have been recently written. After an unclean shutdown, md uses the bitmap to limit the resync operation to only the regions that were being written, dramatically reducing recovery time from days to minutes.
+
+\section{Device Mapper Architecture}
+The Linux device mapper (DM) is the kernel framework that underlies LVM2, dm-crypt, dm-multipath, and other storage abstractions. Understanding DM architecture clarifies how all these tools relate to each other and enables direct use of DM for custom configurations.
+
+\section{Device Mapper Framework}
+The device mapper exposes a kernel interface (/dev/mapper/control) for creating and managing mapped devices. Each mapped device (/dev/mapper/\textless name\textgreater) is defined by a table --- a sequence of target specifications. A table entry specifies a range of logical sectors and the target driver that handles that range. Target drivers include:
+
+\begin{itemize}
+  \item • \textbf{linear}: Maps a range of logical sectors to a range on a backing device. The basis of LVM linear LVs.
+  \item \textbf{striped}: Interleaves sectors across multiple backing devices. LVM striped LVs.
+  \item \textbf{mirror}: Writes to two or more backing devices, reads from any. Legacy LVM mirrors.
+  \item \textbf{raid}: Integrates MD-RAID configurations. Used by LVM RAID LVs.
+  \item \textbf{dm-thin}: Implements thin provisioning. Used by LVM thin pools.
+  \item \textbf{dm-cache}: Implements SSD caching for a slower backing device. Used by LVM cache LVs.
+  \item \textbf{dm-crypt}: Applies transparent encryption/decryption to every I/O. Used by LUKS and dm-crypt-based encryption.
+  \item \textbf{dm-multipath}: Routes I/O across multiple paths to the same device. Used for SAN multipath I/O.
+  \item \textbf{dm-verity}: Computes and verifies a hash tree over a read-only device. Used by Android verified boot, Chrome OS, and Linux dm-verity for system partition integrity.
+  \item \textbf{dm-integrity}: Appends per-sector checksums to a backing device, detecting silent data corruption. Can be used standalone or in combination with dm-crypt for authenticated encryption.
+  \item \textbf{dm-writecache}: A memory (DRAM or PMem) write cache for a backing device, used for accelerating synchronous workloads.
+  \item \textbf{dm-zero}: Returns zeros for all reads. Used for filling the extent backing a thin LV before it is provisioned.
+\end{itemize}
+
+Device mapper tables are loaded and modified using the dmsetup command. When LVM creates a logical volume, it constructs and loads device mapper tables under the covers. Administrators can inspect the tables with dmsetup table and modify mappings with dmsetup suspend + dmsetup reload without interrupting I/O to devices (using the suspend mechanism, which holds in-flight I/Os briefly while the table is swapped).
+
+\section{dm-crypt: Block Device Encryption in the Kernel}
+dm-crypt is the device mapper target that implements transparent encryption. When a read request arrives at a dm-crypt device, the target reads the encrypted ciphertext from the backing device, decrypts it using the configured key and IV (initialization vector), and returns plaintext to the requester. Writes encrypt before writing to the backing device.
+
+dm-crypt supports multiple cipher modes:
+
+\begin{itemize}
+  \item • \textbf{aes-xts-plain64}: AES with XEX-based tweaked codebook mode (XTS) --- the standard for disk encryption. XTS mode uses two AES keys (typically 256-bit total, 128 bits per key), with the second key used to tweak the first for each sector, providing better security than CBC (which is vulnerable to watermarking attacks against known-plaintext).
+  \item \textbf{aes-cbc-essiv:sha256}: An older mode, still supported. ESSIV (Encrypted Salt-Sector IV) uses SHA-256 of the volume key as an AES key for computing per-sector IVs from the sector number, providing reasonable security.
+\end{itemize}
+
+Performance of dm-crypt has improved dramatically with hardware AES-NI instructions in modern CPUs. On CPUs with AES-NI, AES-256-XTS encryption adds negligible overhead (typically less than 5--10\% throughput penalty and near-zero latency impact). dm-crypt supports multi-queue operation (via -\/-perf-no\_read\_workqueue and -\/-perf-no\_write\_workqueue flags in LUKS2) to avoid the legacy single-threaded workqueue architecture and achieve full NVMe performance.
+
+\section{dm-verity: Read-Only Device Integrity}
+dm-verity builds a hash tree (using SHA-256 or SHA-512) over all blocks on a read-only device. The Merkle tree structure means the hash tree root (covering all blocks) can be captured in a single hash value. Any read from the device is verified against the hash tree; a mismatch causes a configurable error response (I/O error, panic, or restart). dm-verity is used in Android A/B updates, Chrome OS, and Container-Optimized OS to protect the system partition from tampering. In enterprise Linux, dm-verity can protect critical application filesystems.
+
+\section{Multipath I/O (DM-MPIO)}
+Enterprise storage environments connect servers to storage arrays or SANs via multiple physical paths --- multiple HBAs on the host, multiple switches in the fabric, multiple ports on the storage controller. Multipath I/O software presents these multiple paths as a single logical device to the operating system, with path failure handled transparently.
+
+\section{Multipath Architecture}
+On Linux, multipath is implemented through dm-multipath, the device mapper target, combined with the multipathd daemon (from the multipath-tools package). The architecture has three components:
+
+\textbf{Path discovery and monitoring}: multipathd detects paths using udev events and SCSI inquiry data. It identifies which block devices represent paths to the same underlying logical unit by comparing identifiers: WWID (World Wide ID from the SCSI Inquiry Page 83 VPD response), T10 Vendor Identifier, or NAA IEEE Registered Extended identifier. Devices sharing a WWID are paths to the same LUN and are grouped into a multipath group.
+
+\textbf{Path grouping and selection policies}: Within a multipath device, paths are organized into path groups, and a path selector algorithm determines which path receives each I/O:
+
+\begin{itemize}
+  \item • \textbf{round-robin}: I/O distributed evenly across all active paths. Maximizes aggregate bandwidth.
+  \item \textbf{queue-length}: I/O directed to the path with the fewest outstanding requests. Adaptive to path latency variations.
+  \item \textbf{service-time}: I/O directed to the path offering the lowest estimated service time based on observed throughput and queue depth.
+  \item \textbf{sticky}: I/O stays on the current path until it fails. Minimizes controller cache warming overhead by not bouncing between ports.
+\end{itemize}
+
+Active/Active configurations send I/O to multiple paths simultaneously. Active/Passive (or ALUA --- Asymmetric Logical Unit Access) configurations have preferred paths through the owning storage controller port and non-preferred paths through the peer controller port. ALUA is the standard for active-active dual-controller arrays (NetApp, Dell, Pure) where each LUN has an "optimized" path through the controller that owns the LUN and "non-optimized" paths through the peer controller.
+
+\textbf{ALUA and Asymmetric Namespace Access}: SCSI ALUA (as defined in SPC-4) defines Access State transition for target port groups. States include Active/Optimized, Active/Non-Optimized, Standby, Unavailable, and Transition. multipathd respects ALUA target port group states when selecting paths. NVMe's Asymmetric Namespace Access (ANA) is the NVMe equivalent, with similar states defined in the NVMe specification.
+
+\section{Path Failover and Recovery}
+When a path fails (I/O errors exceed a threshold, or the path is removed by udev), multipathd marks the path as failed and removes it from the active path group. I/O in-flight on the failed path is requeued to a working path. For applications, the failover is transparent --- they see a brief I/O pause (typically sub-second with properly tuned no\_path\_retry and fast\_io\_fail\_tmo parameters) and then normal operation resumes.
+
+Path recovery (reinstatement) is handled by multipathd's path checker. The checker periodically sends test I/Os (or uses SCSI TUR --- Test Unit Ready --- or NVMe I/O commands) on failed paths. When a previously failed path responds successfully, multipathd reinstates it to the path group.
+
+Key multipath configuration parameters in /etc/multipath.conf:
+
+\begin{itemize}
+  \item • path\_grouping\_policy: How paths are grouped --- multibus (all paths in one group), group\_by\_serial, group\_by\_prio, failover (one path per group).
+  \item path\_selector: The path selection algorithm within a group.
+  \item failback: Whether multipathd automatically fails back to preferred paths when they recover (immediate, manual, or a delay in seconds).
+  \item no\_path\_retry: What to do when all paths fail --- queue (continue queuing I/O indefinitely), fail (return errors immediately), or a number of retries.
+  \item path\_checker: How to check path health --- tur (SCSI Test Unit Ready), directio (try a direct read), hp\_sw (HP Smart Array firmware-specific).
+\end{itemize}
+
+\section{Windows MPIO}
+Windows implements multipath through the MPIO (Multipath I/O) framework --- a driver stack in the Windows kernel. Microsoft provides the base MPIO driver (MPIO.sys) and a Device Specific Module (DSM) layer that handles device-specific behavior. The default DSM is MSDSM (Microsoft DSM), which supports all SCSI-compliant arrays. Storage vendors provide their own DSMs for optimal behavior with their arrays (e.g., Dell EMC PowerPath, NetApp ONTAP DSM).
+
+MPIO on Windows is configured via the mpiocpl (MPIO CPL) Control Panel applet or via PowerShell cmdlets (Get-MSDSMGlobalDefaultLoadBalancePolicy, Set-MSDSMGlobalDefaultLoadBalancePolicy). The MPIO policies available in Windows include Round Robin, Round Robin with Subset (preferred paths with fallback), Least Queue Depth, Weighted Paths, and Least Blocks.
+
+For iSCSI multipath on Windows, Microsoft Initiator's iSCSI sessions support multiple connections per session (MCS --- Multiple Connections per Session) for load balancing within a single iSCSI session, in addition to standard MPIO across multiple sessions.
+
+\section{Storage Virtualization at the Host Level}
+Beyond LVM and basic multipath, the host storage stack can incorporate additional virtualization layers:
+
+\textbf{bcache and dm-cache}: These implement SSD caching for HDD-backed volumes. A fast SSD device is interposed as a read and/or write cache in front of a slower backing device. bcache is a standalone kernel module; dm-cache is the device mapper implementation used by LVM's cache LVs. These provide a transparent performance tier without modifying the backing filesystem, making them appropriate for environments that cannot afford all-flash storage but need to accelerate a hot working set.
+
+\textbf{dm-writecache}: A more specialized write cache using DRAM or PMem as a write-back cache for a slower backing device. Unlike dm-cache (which is a full read-write cache), dm-writecache specifically targets synchronous write acceleration and can use PMem for persistence.
+
+\textbf{ZBD (Zoned Block Device) emulation}: For compatibility with applications that do not support ZNS SSDs or HM-SMR drives natively, dm-zoned presents a conventional block interface backed by a zoned block device, handling the zone management internally.
+
+
+\subsection{VDO --- Virtual Data Optimizer}
+
+\textbf{VDO (Virtual Data Optimizer)} is a kernel module and LVM-integrated data reduction layer that provides inline deduplication and compression for block storage. Originally developed by Permabit and acquired by Red Hat, VDO is now integrated into RHEL as an LVM volume type (\texttt{lvcreate --type vdo}). VDO operates below the filesystem and above the physical storage, deduplicating and compressing data transparently to the filesystem above it.
+
+VDO's deduplication uses a Universal Deduplication Service (UDS) index that maps block fingerprints (MurmurHash3) to physical block addresses. When a write arrives, VDO computes the fingerprint and queries the UDS index. If a matching fingerprint exists, VDO performs a byte-for-byte verification read to confirm the match (eliminating hash collision risk) and maps the logical block to the existing physical block. If no match exists, the block is compressed using LZ4 and written to a new physical location. The UDS index is stored on-disk but cached in memory --- typical memory usage is approximately 1~GB per terabyte of deduplication index.
+
+VDO is particularly effective for virtual machine environments (where multiple VMs share common OS blocks), container images (many layers share base image data), and backup targets. However, VDO adds latency to the write path (the dedup lookup and optional verification read) and requires careful capacity planning: the VDO logical size can be larger than the physical size (thin provisioning), and overcommitment without monitoring can lead to out-of-space conditions. Red Hat recommends a maximum 10:1 logical-to-physical ratio for general workloads.
+
+
+\section{Security \& Governance}
+\section{Encrypted Volumes}
+The security foundation of encrypted volumes rests on three elements: the strength of the cipher, the security of key material, and the integrity of the key management infrastructure.
+
+As discussed in the dm-crypt section, AES-256-XTS is the standard cipher for block device encryption. A key derivation function (KDF) transforms a human passphrase or key file into the actual encryption key: LUKS2 uses Argon2id by default, which requires substantial memory (64 MB default) and time to compute, making GPU-accelerated brute-force attacks impractical. For key-file based decryption (relevant in server scenarios with automated unlock), the key file itself should be randomly generated (from /dev/urandom) and stored protected --- ideally in a hardware security module or TPM.
+
+\textbf{Key rotation}: For LUKS volumes, key rotation should be performed periodically and after any suspected key compromise. LUKS2's cryptsetup-reencrypt performs online re-encryption: while the volume is in use, it re-encrypts every block with a new key. This is a significant I/O operation (reads and writes every block) but does not require application downtime.
+
+\textbf{Avoiding cold boot attacks}: DRAM retains its contents for seconds to minutes after power removal, and this retention can be extended by cooling the memory modules to near liquid-nitrogen temperatures. An attacker with physical access who powers off a system and immediately removes or cools the DRAM can potentially recover in-memory encryption keys. Defenses include: using encrypted swap (/dev/urandom-seeded swap), enabling KASLR, configuring the system to prohibit cold boot (configuring memory overwrite on power loss via BIOS settings where available), and using HSM-based key storage where the key never resides in host DRAM.
+
+\section{TPM-Backed Key Storage}
+The Trusted Platform Module (TPM) is a secure cryptoprocessor, either discrete (dTPM, soldered to the motherboard) or firmware-based (fTPM, implemented in UEFI/management engine firmware). The TPM provides several capabilities relevant to storage encryption:
+
+\textbf{Sealed storage}: The TPM can seal a data object (such as a volume encryption key) to the TPM's current PCR (Platform Configuration Register) values. PCRs are hardware registers that accumulate measurements of the boot process: firmware code, option ROMs, bootloader, and OS kernel. Each measurement is a SHA-1 or SHA-256 hash of the component being measured, extended into the PCR using a extend operation (PCR\_new = Hash(PCR\_old \textbar\textbar{} measurement)). Once sealed, the data can only be unsealed if the TPM's current PCR values match those at sealing time --- if any measured component has changed, unsealing fails.
+
+For LUKS2 with systemd-cryptenroll:
+
+\begin{itemize}
+  \item 1. At enrollment time: the LUKS volume key is sealed to the TPM with a PCR policy specifying which PCRs must match.
+2. At boot time: systemd's cryptsetup reads the sealed key from the TPM, the TPM verifies the current PCR values match the policy, and if so releases the key to decrypt the volume.
+3. If the boot configuration changes (firmware update, bootloader update, kernel update): PCR values differ from the policy, TPM refuses to release the key, and the user must unlock with a recovery passphrase before updating the TPM policy.
+\end{itemize}
+
+\textbf{TPM PCR assignment}: The standard PCR allocation is:
+
+\begin{itemize}
+  \item • PCR 0: Core UEFI firmware executable
+  \item PCR 1: UEFI firmware data/configuration
+  \item PCR 2: Extended or pluggable executable code (option ROMs)
+  \item PCR 3: Extended or pluggable firmware data
+  \item PCR 4: Boot manager code (UEFI bootloader)
+  \item PCR 5: Boot manager data and settings
+  \item PCR 6: Resume from S4/S5
+  \item PCR 7: Secure Boot policy
+  \item PCR 8--15: OS-controlled (grub measures kernel and initrd into PCR 8--9)
+\end{itemize}
+
+A typical LUKS2 TPM unlock policy binds to PCR 7 (Secure Boot) and PCR 14 (MoK database for Secure Boot key enrollment), allowing kernel updates without requiring re-sealing while still protecting against booting with Secure Boot disabled.
+
+\section{Secure Boot Chain}
+Secure Boot is a UEFI feature that verifies the digital signature of each bootloader and kernel before execution, using a database of trusted keys (the UEFI Secure Boot database, db) and revoked keys/hashes (dbx). The chain of trust:
+
+\begin{itemize}
+  \item 1. UEFI firmware (root of trust, stored in SPI flash, signed by OEM key)
+2. UEFI Secure Boot verifies the EFI bootloader (shim, signed by Microsoft UEFI CA) against db
+3. Shim verifies the GRUB bootloader against the distribution's vendor certificate (in shim's embedded key or the MoK database)
+4. GRUB verifies the Linux kernel against the distribution's key
+5. The Linux kernel module signing key verifies loadable kernel modules
+\end{itemize}
+
+If Secure Boot is broken at any point in this chain --- by loading an unsigned bootloader, a revoked key, or by a firmware vulnerability --- the trust foundation for TPM-sealed disk encryption is also compromised. An attacker who can boot from USB with Secure Boot disabled can read the TPM-sealed key.
+
+\textbf{Measured Boot and Remote Attestation}: Secure Boot verifies signatures (is the component known-good?). Measured Boot, implemented via TPM PCR measurements, records what actually ran (what is the state of the system?). Remote attestation combines both: a remote attestation server requests a TPM-signed PCR quote, the TPM signs the current PCR values with the TPM's attestation key (an asymmetric key that can prove it was generated by a real TPM), and the attestation server verifies that the signed PCR values represent a trusted boot state. This enables zero-trust enrollment: a server is only granted network access to its encrypted storage after it has remotely attested a valid boot state to the key release server.
+
+Microsoft's Network Unlock for BitLocker and HashiCorp Vault with TPM-based Vault sealing are practical implementations of this model in enterprise environments.
+
+\textbf{Physical security boundaries}: Encryption and TPM-based key sealing protect against offline attacks (stolen drive, powered-off system). They do not protect a running system from software attacks that compromise the OS. Once the system boots and the volume is decrypted, a running malicious process can read the decrypted data. Storage encryption is one layer of a defense-in-depth strategy; it must be combined with OS-level access controls (discussed in Chapter 2), network security, and application-level controls to achieve a complete security posture.
+

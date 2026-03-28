@@ -1,0 +1,318 @@
+% =============================================================================
+% Appendix A — Command Reference
+% =============================================================================
+\chapter{Command Reference}\label{app:commands}
+
+This appendix provides a concise quick-reference for the most commonly used
+storage administration commands on Linux. Each section groups related
+utilities by domain. For full syntax and options, consult the respective
+\texttt{man} pages or upstream documentation. Unless noted otherwise, most
+commands require root privileges or \texttt{sudo}.
+
+%% ---------------------------------------------------------------------------
+%% 1. Block Device Commands
+%% ---------------------------------------------------------------------------
+\section*{Block Device Commands}
+
+The following commands inspect, partition, and tune block devices at the lowest
+level of the Linux storage stack.
+
+\begin{longtable}{p{4cm} p{8cm}}
+\toprule
+\textbf{Command} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{lsblk} & List all block devices in a tree view showing name, size, type, and mount point. Use \texttt{-f} to include filesystem and UUID information. \\
+\texttt{lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT} & Display selected columns for a compact device overview. \\
+\texttt{blkid} & Print block device attributes including UUID, filesystem type, and label. Useful for writing persistent \texttt{fstab} entries. \\
+\texttt{fdisk -l /dev/sdX} & List the MBR/GPT partition table on a given disk. \\
+\texttt{fdisk /dev/sdX} & Interactively create, delete, or modify MBR partitions (also supports GPT on modern versions). \\
+\texttt{gdisk /dev/sdX} & GPT-aware partition editor. Preferred for disks larger than 2\,TiB or UEFI systems. \\
+\texttt{parted /dev/sdX print} & Print the partition layout using GNU Parted, which supports both MBR and GPT. \\
+\texttt{parted /dev/sdX mkpart primary ext4 0\% 100\%} & Create a single partition spanning the entire disk. \\
+\texttt{blockdev --getbsz /dev/sdX} & Query the logical block size of a device. \\
+\texttt{blockdev --getsize64 /dev/sdX} & Return device size in bytes. \\
+\texttt{blockdev --setra 4096 /dev/sdX} & Set read-ahead to 4096 sectors (2\,MiB with 512-byte sectors). \\
+\texttt{hdparm -I /dev/sdX} & Display detailed drive identification (model, serial, firmware, feature set). \\
+\texttt{hdparm -tT /dev/sdX} & Benchmark cached and buffered read performance of a device. \\
+\texttt{hdparm --security-erase /dev/sdX} & Issue an ATA Secure Erase command (use with extreme caution). \\
+\bottomrule
+\end{longtable}
+
+%% ---------------------------------------------------------------------------
+%% 2. Filesystem Commands
+%% ---------------------------------------------------------------------------
+\section*{Filesystem Commands}
+
+These commands create, inspect, tune, repair, mount, and measure Linux
+filesystems.
+
+\begin{longtable}{p{4cm} p{8cm}}
+\toprule
+\textbf{Command} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{mkfs.ext4 /dev/sdX1} & Format a partition with the ext4 filesystem using default parameters. \\
+\texttt{mkfs.ext4 -L data -b 4096 -J size=256 /dev/sdX1} & Create ext4 with a label, 4\,KiB block size, and a 256\,MiB journal. \\
+\texttt{mkfs.xfs /dev/sdX1} & Create an XFS filesystem. XFS is the default on many enterprise distributions. \\
+\texttt{mkfs.xfs -d su=64k,sw=8 /dev/sdX1} & Create XFS aligned to a RAID stripe of 64\,KiB units and 8 data disks. \\
+\texttt{mkfs.btrfs /dev/sdX1} & Create a Btrfs filesystem supporting CoW, snapshots, and checksumming. \\
+\texttt{mkfs.btrfs -d raid1 -m raid1 /dev/sdX1 /dev/sdY1} & Create a Btrfs pool with mirrored data and metadata across two devices. \\
+\texttt{tune2fs -l /dev/sdX1} & Show ext2/3/4 superblock information (label, UUID, mount count, etc.). \\
+\texttt{tune2fs -c 30 -i 90d /dev/sdX1} & Force fsck after 30 mounts or 90 days, whichever comes first. \\
+\texttt{xfs\_info /mount/point} & Display XFS geometry (block size, allocation groups, log size). \\
+\texttt{xfs\_repair /dev/sdX1} & Check and repair an XFS filesystem (must be unmounted). \\
+\texttt{xfs\_repair -n /dev/sdX1} & Dry-run repair: report errors without modifying the filesystem. \\
+\texttt{e2fsck -f /dev/sdX1} & Force a full integrity check of an ext2/3/4 filesystem. \\
+\texttt{e2fsck -p /dev/sdX1} & Automatically repair safe, non-destructive ext filesystem errors. \\
+\texttt{fsck /dev/sdX1} & Generic front-end that calls the appropriate filesystem checker. \\
+\texttt{df -hT} & Show disk usage for all mounted filesystems with human-readable sizes and types. \\
+\texttt{du -sh /path} & Summarise the disk usage of a directory tree. \\
+\texttt{du --max-depth=1 -h /path} & Show per-subdirectory usage one level deep. \\
+\texttt{mount /dev/sdX1 /mnt} & Mount a filesystem at the specified mount point. \\
+\texttt{mount -o remount,ro /mnt} & Remount an already-mounted filesystem as read-only. \\
+\texttt{mount -t nfs server:/export /mnt} & Mount an NFS export. \\
+\texttt{umount /mnt} & Unmount a filesystem. Use \texttt{-l} for lazy unmount if busy. \\
+\bottomrule
+\end{longtable}
+
+%% ---------------------------------------------------------------------------
+%% 3. LVM Commands
+%% ---------------------------------------------------------------------------
+\section*{LVM Commands}
+
+Logical Volume Manager (LVM) commands follow a three-layer model: Physical
+Volumes (PV), Volume Groups (VG), and Logical Volumes (LV).
+
+\begin{longtable}{p{4cm} p{8cm}}
+\toprule
+\textbf{Command} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{pvcreate /dev/sdX1} & Initialise a partition or disk as an LVM physical volume. \\
+\texttt{pvs} & Compact one-line-per-PV summary (size, VG, free). \\
+\texttt{pvdisplay /dev/sdX1} & Detailed information about a physical volume. \\
+\texttt{vgcreate vg0 /dev/sdX1 /dev/sdY1} & Create volume group \texttt{vg0} from two physical volumes. \\
+\texttt{vgs} & Compact one-line-per-VG summary. \\
+\texttt{vgdisplay vg0} & Detailed information about a volume group. \\
+\texttt{vgextend vg0 /dev/sdZ1} & Add a new PV to an existing volume group. \\
+\texttt{lvcreate -L 50G -n data vg0} & Create a 50\,GiB logical volume named \texttt{data}. \\
+\texttt{lvcreate -l 100\%FREE -n data vg0} & Use all remaining free space in the VG. \\
+\texttt{lvcreate -L 10G -s -n snap /dev/vg0/data} & Create a 10\,GiB snapshot of LV \texttt{data}. \\
+\texttt{lvs} & Compact one-line-per-LV summary. \\
+\texttt{lvdisplay /dev/vg0/data} & Detailed information about a logical volume. \\
+\texttt{lvextend -L +20G /dev/vg0/data} & Grow the logical volume by 20\,GiB. \\
+\texttt{lvextend -l +100\%FREE /dev/vg0/data} & Extend to fill all remaining VG space. \\
+\texttt{lvreduce -L 30G /dev/vg0/data} & Shrink to 30\,GiB (resize the filesystem first). \\
+\texttt{lvremove /dev/vg0/data} & Delete a logical volume (data is destroyed). \\
+\texttt{resize2fs /dev/vg0/data} & Grow an ext2/3/4 filesystem to fill its LV after \texttt{lvextend}. \\
+\texttt{resize2fs /dev/vg0/data 30G} & Shrink an ext2/3/4 filesystem to 30\,GiB before \texttt{lvreduce}. \\
+\texttt{xfs\_growfs /mount/point} & Grow an XFS filesystem online to fill its LV (XFS cannot shrink). \\
+\bottomrule
+\end{longtable}
+
+%% ---------------------------------------------------------------------------
+%% 4. RAID Commands
+%% ---------------------------------------------------------------------------
+\section*{RAID Commands (mdadm)}
+
+\texttt{mdadm} manages Linux software RAID (MD-RAID) arrays. The utility uses
+mode flags (\texttt{--create}, \texttt{--manage}, etc.) to separate
+operational contexts.
+
+\begin{longtable}{p{4cm} p{8cm}}
+\toprule
+\textbf{Command} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{mdadm --create /dev/md0 --level=5 --raid-devices=4 /dev/sd[b-e]1} & Create a RAID-5 array from four partitions. \\
+\texttt{mdadm --create /dev/md0 --level=1 --raid-devices=2 /dev/sd[b-c]1 --spare-devices=1 /dev/sdd1} & Create a RAID-1 mirror with a hot spare. \\
+\texttt{mdadm --detail /dev/md0} & Display comprehensive array status: level, size, state, member disks, and rebuild progress. \\
+\texttt{mdadm --examine /dev/sdb1} & Read and display the RAID superblock from a member device. \\
+\texttt{mdadm --manage /dev/md0 --add /dev/sdf1} & Hot-add a new device to an existing array (spare or grow). \\
+\texttt{mdadm --manage /dev/md0 --fail /dev/sdb1} & Mark a device as failed to trigger a spare rebuild. \\
+\texttt{mdadm --manage /dev/md0 --remove /dev/sdb1} & Remove a previously failed device from the array. \\
+\texttt{mdadm --grow /dev/md0 --raid-devices=5} & Reshape the array to include an additional device online. \\
+\texttt{mdadm --grow /dev/md0 --size=max} & Grow the array to use the full capacity of each member device. \\
+\texttt{mdadm --stop /dev/md0} & Deactivate a running array. \\
+\texttt{mdadm --assemble /dev/md0 --scan} & Reassemble a previously created array by scanning superblocks. \\
+\texttt{cat /proc/mdstat} & Quick kernel-level overview of all active arrays and rebuild progress. \\
+\bottomrule
+\end{longtable}
+
+%% ---------------------------------------------------------------------------
+%% 5. ZFS Commands
+%% ---------------------------------------------------------------------------
+\section*{ZFS Commands}
+
+ZFS combines volume management and filesystem capabilities into a single
+layer. Administration is split between \texttt{zpool} (storage pools) and
+\texttt{zfs} (datasets, snapshots, properties).
+
+\begin{longtable}{p{4cm} p{8cm}}
+\toprule
+\textbf{Command} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{zpool create tank mirror /dev/sdb /dev/sdc} & Create a mirrored pool named \texttt{tank}. \\
+\texttt{zpool create tank raidz2 /dev/sd[b-g]} & Create a RAID-Z2 (double-parity) pool from six disks. \\
+\texttt{zpool status} & Show pool health, scrub progress, and per-device error counters. \\
+\texttt{zpool list} & List all imported pools with size, allocated, free, and health. \\
+\texttt{zpool scrub tank} & Initiate a background integrity scrub on pool \texttt{tank}. \\
+\texttt{zpool import} & Scan for exportable pools available for import. \\
+\texttt{zpool import tank} & Import pool \texttt{tank} and mount its datasets. \\
+\texttt{zpool export tank} & Export (cleanly detach) a pool for transport or shutdown. \\
+\texttt{zpool iostat -v 5} & Stream per-vdev I/O statistics every 5 seconds. \\
+\texttt{zpool add tank cache /dev/nvme0n1} & Add an NVMe device as an L2ARC read cache. \\
+\texttt{zpool add tank log mirror /dev/nvme1n1 /dev/nvme2n1} & Add a mirrored SLOG (ZIL) device for synchronous writes. \\
+\midrule
+\texttt{zfs create tank/data} & Create a new dataset under pool \texttt{tank}. \\
+\texttt{zfs create -V 50G tank/vol0} & Create a 50\,GiB ZFS volume (zvol) usable as a block device. \\
+\texttt{zfs list} & List all datasets with used, available, referenced, and mount point. \\
+\texttt{zfs list -t snapshot} & List all snapshots across all pools. \\
+\texttt{zfs snapshot tank/data@snap1} & Create an instantaneous point-in-time snapshot. \\
+\texttt{zfs snapshot -r tank@daily} & Recursively snapshot all datasets under \texttt{tank}. \\
+\texttt{zfs clone tank/data@snap1 tank/clone1} & Create a writable clone from a snapshot. \\
+\texttt{zfs send tank/data@snap1 | zfs receive backup/data} & Replicate a snapshot to another pool or remote host. \\
+\texttt{zfs send -i @snap1 tank/data@snap2 | zfs receive backup/data} & Incremental send of only the delta between two snapshots. \\
+\texttt{zfs set compression=lz4 tank/data} & Enable LZ4 inline compression on a dataset. \\
+\texttt{zfs set quota=100G tank/data} & Limit the dataset to 100\,GiB of consumed space. \\
+\texttt{zfs set atime=off tank/data} & Disable access-time updates to reduce metadata writes. \\
+\texttt{zfs get all tank/data} & Display all properties (local, inherited, default) of a dataset. \\
+\texttt{zfs destroy tank/data@snap1} & Delete a snapshot. Use \texttt{-r} for recursive destruction. \\
+\texttt{zfs rollback tank/data@snap1} & Revert a dataset to the state captured in a snapshot. \\
+\bottomrule
+\end{longtable}
+
+%% ---------------------------------------------------------------------------
+%% 6. Encryption Commands
+%% ---------------------------------------------------------------------------
+\section*{Encryption Commands}
+
+Linux full-disk encryption is typically managed through \texttt{cryptsetup}
+with the LUKS on-disk format. File-level encryption can use \texttt{fscrypt}.
+
+\begin{longtable}{p{4cm} p{8cm}}
+\toprule
+\textbf{Command} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{cryptsetup luksFormat /dev/sdX1} & Initialise a LUKS-encrypted partition (destroys existing data). Prompts for a passphrase. \\
+\texttt{cryptsetup luksFormat --type luks2 --cipher aes-xts-plain64 --key-size 512 /dev/sdX1} & Create a LUKS2 volume with explicit cipher and 256-bit AES-XTS. \\
+\texttt{cryptsetup luksOpen /dev/sdX1 crypt0} & Unlock the LUKS partition and create device-mapper node \texttt{/dev/mapper/crypt0}. \\
+\texttt{cryptsetup luksClose crypt0} & Lock the device and remove the mapper node. \\
+\texttt{cryptsetup luksAddKey /dev/sdX1} & Add an additional passphrase or key file to a LUKS key slot. \\
+\texttt{cryptsetup luksRemoveKey /dev/sdX1} & Remove a passphrase from the LUKS header. \\
+\texttt{cryptsetup luksDump /dev/sdX1} & Print the LUKS header: UUID, cipher, key slots, and their status. \\
+\texttt{cryptsetup luksHeaderBackup /dev/sdX1 --header-backup-file hdr.img} & Back up the LUKS header for disaster recovery. \\
+\texttt{cryptsetup luksSuspend crypt0} & Freeze I/O and wipe the volume key from memory (for hibernation). \\
+\texttt{cryptsetup luksResume crypt0} & Re-authenticate and resume I/O on a suspended device. \\
+\texttt{fscrypt setup /} & Initialise fscrypt metadata on a mounted ext4 or F2FS filesystem. \\
+\texttt{fscrypt encrypt /path/dir} & Encrypt a directory with fscrypt; files are encrypted at the filesystem layer. \\
+\texttt{fscrypt unlock /path/dir} & Unlock a previously encrypted directory. \\
+\texttt{fscrypt status /path/dir} & Show encryption policy and key status for a directory. \\
+\bottomrule
+\end{longtable}
+
+%% ---------------------------------------------------------------------------
+%% 7. Network Storage Commands
+%% ---------------------------------------------------------------------------
+\section*{Network Storage Commands}
+
+These tools configure and interact with iSCSI, NFS, and SMB/CIFS network
+storage targets and clients.
+
+\begin{longtable}{p{4cm} p{8cm}}
+\toprule
+\textbf{Command} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{iscsiadm -m discovery -t st -p 10.0.0.1} & Discover iSCSI targets on a portal via SendTargets. \\
+\texttt{iscsiadm -m node -T iqn.target -p 10.0.0.1 --login} & Log in to a discovered iSCSI target. \\
+\texttt{iscsiadm -m node -T iqn.target --logout} & Log out from an iSCSI target. \\
+\texttt{iscsiadm -m session} & List all active iSCSI sessions. \\
+\texttt{iscsiadm -m node -T iqn.target -o update -n node.startup -v automatic} & Enable automatic login at boot. \\
+\texttt{targetcli} & Open the LIO kernel target interactive shell for configuring iSCSI, FC, and NVMe-oF targets. \\
+\texttt{targetcli /backstores/block create blk0 /dev/vg0/lun0} & Create a block backstore from an LVM volume. \\
+\texttt{exportfs -v} & Display all currently exported NFS shares with options. \\
+\texttt{exportfs -a} & Export all entries defined in \texttt{/etc/exports}. \\
+\texttt{exportfs -r} & Re-export all shares (picks up \texttt{/etc/exports} changes). \\
+\texttt{showmount -e server} & Query an NFS server for its list of exports. \\
+\texttt{mount -t nfs -o vers=4.2,sec=krb5p server:/vol /mnt} & Mount an NFSv4.2 share with Kerberos privacy protection. \\
+\texttt{mount.nfs server:/vol /mnt} & Mount helper for NFS (called by \texttt{mount -t nfs}). \\
+\texttt{mount.cifs //server/share /mnt -o user=admin} & Mount a CIFS/SMB share with the specified user credentials. \\
+\texttt{smbclient //server/share -U user} & Interactive SMB client for browsing and transferring files. \\
+\texttt{smbclient -L server} & List available shares on an SMB server. \\
+\bottomrule
+\end{longtable}
+
+%% ---------------------------------------------------------------------------
+%% 8. Performance Tools
+%% ---------------------------------------------------------------------------
+\section*{Performance and Observability Tools}
+
+Profiling and benchmarking tools for measuring storage I/O latency,
+throughput, and queue depth.
+
+\begin{longtable}{p{4cm} p{8cm}}
+\toprule
+\textbf{Command} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{iostat -xz 1} & Stream extended per-device I/O statistics every second (utilisation, await, queue depth). \\
+\texttt{iostat -p ALL 5 3} & Report per-partition stats: 5-second interval, 3 iterations. \\
+\texttt{blktrace -d /dev/sdX -o trace} & Capture block-layer trace events for offline analysis. \\
+\texttt{blkparse -i trace} & Parse and display a \texttt{blktrace} capture. \\
+\texttt{btt -i trace.blktrace.0} & Generate block-layer timing statistics from a trace. \\
+\texttt{fio --name=test --rw=randread --bs=4k --numjobs=4 --iodepth=32 --size=1G --runtime=60} & Run a 4\,KiB random-read benchmark with 4 jobs and queue depth 32. \\
+\texttt{fio --name=seqwrite --rw=write --bs=1M --direct=1 --size=10G} & Sequential 1\,MiB write throughput test with O\_DIRECT. \\
+\texttt{fio --name=mixed --rw=randrw --rwmixread=70 --bs=8k --iodepth=16 --size=2G} & 70/30 mixed random read/write workload with 8\,KiB blocks. \\
+\texttt{perf stat -e block:* -a -- sleep 10} & Count block-layer tracepoint events system-wide for 10 seconds. \\
+\texttt{perf record -e block:block\_rq\_complete -ag -- sleep 30} & Record block request completion events for flame graph analysis. \\
+\texttt{bpftrace -e 'tracepoint:block:block\_rq\_issue \{ @[comm] = count(); \}'} & Count block I/O requests by process name using eBPF. \\
+\texttt{bpftrace -e 'kprobe:blk\_account\_io\_done \{ @us = hist(nsecs/1000); \}'} & Histogram of block I/O completion latency in microseconds. \\
+\texttt{sar -d 1 10} & Collect disk activity reports every second for 10 samples. \\
+\texttt{sar -b 5} & Report I/O transfer rates every 5 seconds. \\
+\texttt{dstat -tdD sda 1} & Combine time-stamped disk throughput stats for \texttt{sda}. \\
+\texttt{dstat -cmdn 5} & Combined CPU, memory, disk, and network overview at 5-second intervals. \\
+\bottomrule
+\end{longtable}
+
+%% ---------------------------------------------------------------------------
+%% 9. Ceph Commands
+%% ---------------------------------------------------------------------------
+\section*{Ceph Commands}
+
+Ceph is a distributed storage platform providing block (RBD), object (RGW),
+and filesystem (CephFS) interfaces. The \texttt{ceph} command-line tool
+communicates with the cluster monitor daemons.
+
+\begin{longtable}{p{4cm} p{8cm}}
+\toprule
+\textbf{Command} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{ceph status} & Overall cluster health, monitor quorum, OSD counts, and PG state summary (shorthand: \texttt{ceph -s}). \\
+\texttt{ceph health detail} & Verbose health information including per-PG and per-OSD warnings. \\
+\texttt{ceph osd tree} & Display the CRUSH hierarchy: hosts, racks, and OSD placement. \\
+\texttt{ceph osd pool ls detail} & List all pools with replication factor, PG count, and CRUSH rule. \\
+\texttt{ceph osd pool create mypool 128} & Create a new pool with 128 placement groups. \\
+\texttt{ceph pg stat} & Summarise placement group states across the cluster. \\
+\texttt{ceph pg dump} & Detailed dump of every PG (large output on big clusters). \\
+\texttt{ceph df} & Show cluster and per-pool space usage. \\
+\texttt{ceph osd perf} & Per-OSD commit and apply latency statistics. \\
+\midrule
+\texttt{rados -p mypool ls} & List objects stored in a RADOS pool. \\
+\texttt{rados -p mypool put obj1 /tmp/file} & Upload a local file as a RADOS object. \\
+\texttt{rados -p mypool get obj1 /tmp/out} & Download a RADOS object to a local file. \\
+\texttt{rados bench -p mypool 30 write} & Run a 30-second write benchmark on the specified pool. \\
+\midrule
+\texttt{rbd create mypool/img0 --size 100G} & Create a 100\,GiB RADOS Block Device image. \\
+\texttt{rbd ls mypool} & List RBD images in a pool. \\
+\texttt{rbd info mypool/img0} & Display image metadata: size, features, object size. \\
+\texttt{rbd map mypool/img0} & Map an RBD image as a local block device (\texttt{/dev/rbdN}). \\
+\texttt{rbd unmap /dev/rbd0} & Unmap a previously mapped RBD device. \\
+\texttt{rbd snap create mypool/img0@s1} & Create a snapshot of an RBD image. \\
+\texttt{rbd export mypool/img0 img0.raw} & Export an RBD image to a local raw file. \\
+\bottomrule
+\end{longtable}

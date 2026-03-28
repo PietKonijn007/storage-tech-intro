@@ -1,0 +1,273 @@
+\chapter{Filesystems --- Architecture and Trade-offs}
+\label{ch:3}
+
+A filesystem is the layer of software that imposes structure on a raw block device, transforming an array of addressable sectors into a navigable hierarchy of files and directories with associated metadata. It is one of the most consequential design decisions in a storage system, determining data integrity guarantees, performance characteristics, maximum capacity, snapshot capabilities, and the operational overhead of administration. This chapter examines the fundamental data structures that all filesystems share, then analyzes the major filesystem implementations deployed in enterprise Linux and Windows environments --- including an in-depth treatment of ZFS, whose architecture represents the most significant advance in filesystem design of the past two decades.
+
+\section{Filesystem Fundamentals}
+\section{Block Groups, Superblocks, and the Disk Layout}
+A filesystem divides the underlying block device into a logical structure. Most filesystems begin with a superblock --- a data structure placed at a known offset on the device (often offset 1024 bytes from the start, or at the beginning of each block group) that describes the filesystem as a whole: total block count, free block count, block size, inode count, filesystem state flags, UUID, and the location of other critical metadata structures. The superblock is so critical that most filesystems maintain multiple copies at predictable locations across the device. On startup or after an unclean shutdown, the kernel reads the superblock to understand the filesystem's current state.
+
+The physical storage area is divided into block groups (ext4), cylinder groups (FFS/UFS), or allocation groups (XFS). Block groups exist to improve locality: when a new file is created, the filesystem attempts to allocate both the inode and the data blocks within the same block group, reducing seek distance on spinning disks. Each block group contains its own bitmap structures tracking free blocks and free inodes, a copy of the superblock, and a block group descriptor table. Modern filesystems with flex\_bg (flexible block groups in ext4) relax strict per-group metadata to improve large-file performance.
+
+\section{Inodes: The Core Metadata Unit}
+The inode (index node) is the fundamental metadata structure for a file or directory in Unix-derived filesystems. An inode stores everything about a file except its name:
+
+\begin{itemize}
+  \item • File type (regular file, directory, symbolic link, block device, character device, socket, FIFO)
+  \item Permissions (owner UID, group GID, permission bits)
+  \item Link count (number of hard links pointing to this inode)
+  \item File size
+  \item Timestamps: atime (last access), mtime (last modification), ctime (last inode change)
+  \item Pointers to data blocks
+\end{itemize}
+
+The classic inode structure uses a multi-level block pointer scheme: the inode contains direct block pointers (pointing directly to data blocks), single-indirect pointers (pointing to a block of block pointers), double-indirect pointers (pointer $\rightarrow$ block of pointers $\rightarrow$ data blocks), and triple-indirect pointers. This scheme provides flexible scaling from small files to large files, though it is inefficient for large files requiring many indirect block lookups. Modern filesystems replace this with extent-based addressing, described below.
+
+Inodes are pre-allocated in a fixed-size inode table at filesystem creation time (in ext2/3/4) or dynamically allocated (XFS, Btrfs). Inode exhaustion --- running out of inodes on a filesystem that still has free block space --- is a classic administration failure mode, typically encountered in directories containing millions of small files (log files, email spools, package manager caches). The correct response is to tune the inode ratio at filesystem creation time based on expected file size distribution.
+
+\section{Dentries and the Directory Entry Cache}
+While inodes store file metadata, directory entries (dentries) associate file names with inode numbers. A directory is itself stored as a file (its inode has type "directory") containing a list of name-to-inode mappings. The kernel's dentry cache (dcache) is an in-memory cache of recently accessed directory entries, dramatically accelerating path resolution. A deep path like /var/log/app/server/daily/2026-03-27/access.log requires resolving six directory entries before reaching the file's inode; the dcache converts what would be six separate disk reads into typically zero disk reads for frequently accessed paths.
+
+The dcache and inode cache (icache) together are among the most performance-critical in-kernel caches. Under memory pressure, the kernel reclaims these caches, causing a temporary performance degradation as paths must be re-resolved from disk. On servers with very large directory trees (distributed computing environments, NFS servers), sizing the dcache appropriately via kernel parameters is relevant to sustained performance.
+
+\section{Journaling: Write Ordering and Crash Consistency}
+Without journaling, a filesystem that loses power during a write operation may be left in an inconsistent state --- partially written metadata, cross-linked blocks, orphaned inodes. The traditional recovery approach was fsck (filesystem check), a full offline scan that could take hours on large filesystems. Journaling addresses this by writing metadata changes to a journal (a circular log area on the same device) before applying them to their final locations on disk. On recovery, the filesystem replays or discards journal entries, restoring consistency quickly.
+
+Journaling operates at different levels of protection:
+
+\textbf{Writeback mode}: Only metadata is journaled; data blocks are written asynchronously to their final locations. Metadata consistency is guaranteed after recovery, but files may contain stale data from before the crash if the data write was in-flight. This is the default for ext3/4 on most distributions --- it offers good performance at the cost of potential data corruption within the file (though the filesystem structure itself is always consistent).
+
+\textbf{Ordered mode}: Data blocks are written to their final locations before the associated metadata is committed to the journal. This ensures that if the metadata commit is lost, the old metadata points to old (valid) data rather than potentially new stale data. Ordered mode is the ext4 default and provides the best balance of safety and performance without writing data twice.
+
+\textbf{Journal mode (data journaling)}: Both data and metadata are written to the journal before being committed to their final locations. This provides the strongest consistency guarantees --- after a crash, the journal can be replayed to restore both data and metadata to a consistent state --- but requires writing data twice (once to the journal, once to final location), approximately halving write throughput. Journal mode is appropriate for high-value small files where data integrity is paramount.
+
+\section{Extents: Efficient Large-File Addressing}
+Extent-based addressing replaces the multi-level block pointer scheme with extent descriptors. An extent describes a contiguous run of blocks: a starting block number and a length. A large sequential file stored in contiguous blocks on disk requires only a single extent descriptor rather than thousands of individual block pointers. Extents reduce the size of the block map for large files, reduce the number of indirect block I/Os required, and naturally encourage contiguous allocation.
+
+ext4, XFS, Btrfs, and NTFS all use extent-based addressing. A file's extent tree (B-tree in XFS and ext4) holds multiple extents, accommodating fragmented files while still benefiting from extent efficiency for each contiguous region.
+
+\section{Linux Filesystems}
+\section{ext4: The Workhouse Filesystem}
+ext4 is the direct descendant of ext2 (1993) and ext3 (2001) and remains the default filesystem for many Linux distributions. Its lineage means it is extraordinarily well-tested and broadly compatible, but it also carries design constraints inherited from its 30-year-old codebase.
+
+\section{Key ext4 features:}
+\begin{itemize}
+  \item • Block sizes of 1 KB, 2 KB, or 4 KB (most commonly 4 KB). Larger block sizes (up to 64 KB with bigalloc) improve efficiency for large files but waste space for small files.
+  \item Extents replacing the old indirect block scheme (from ext3 to ext4).
+  \item 64-bit block numbers supporting volumes up to 1 EiB (with 4K blocks).
+  \item Flexible block groups (flex\_bg) that aggregate block group metadata, improving metadata performance.
+  \item Delayed allocation: the kernel accumulates writes in the page cache and defers block allocation until the data must be flushed. This allows better allocation decisions (larger contiguous extents) but means data is not allocated on disk during a write() call, creating a window where an application that assumes allocation-on-write may experience data corruption after a crash even after fsync(). Certain applications (databases using O\_DIRECT, SQLite) have historically needed special handling.
+  \item Online resizing: ext4 volumes can be extended (and in some configurations, shrunk) while mounted.
+  \item Journal checksumming: ext4 checksums journal blocks, preventing recovery from a corrupted journal.
+  \item Inline data: files smaller than approximately 60 bytes can be stored directly in the inode, eliminating a block allocation and I/O.
+\end{itemize}
+
+\section{Limitations of ext4:}
+\begin{itemize}
+  \item • No native checksums on data blocks. Silent data corruption --- where media returns wrong bits without a read error --- is undetectable at the filesystem layer without external checksumming.
+  \item No native snapshot capability (volume-level snapshots require LVM or storage array snapshots).
+  \item Metadata performance under directory operations with very high file counts (millions of entries per directory) degrades without the htree feature (hash-indexed directories), which is now default.
+  \item Maximum individual file size of 16 TiB with 4K blocks.
+  \item No built-in data deduplication or compression.
+\end{itemize}
+
+ext4 remains the correct choice for boot volumes, general-purpose workloads, and environments requiring maximum compatibility with Linux distributions and recovery tooling.
+
+\section{XFS: High-Performance Parallel Filesystem}
+XFS was developed by Silicon Graphics in 1993 for IRIX and ported to Linux in 2001. Its design goals were specifically around high-throughput, high-concurrency workloads on large storage. Red Hat Enterprise Linux has used XFS as its default filesystem since RHEL 7, reflecting its maturity and performance.
+
+\section{XFS internal architecture:}
+XFS divides the filesystem into allocation groups (AGs), each a self-contained metadata region. The number of AGs scales with filesystem size, and critically, most filesystem operations within an AG are independent of other AGs. This allows XFS to perform parallel metadata operations --- creating files, allocating blocks, extending inodes --- concurrently in different AGs. On multi-core systems with high I/O parallelism, XFS dramatically outperforms ext4 for metadata-heavy workloads.
+
+The inode structure in XFS is dynamic: inodes are not pre-allocated in a fixed table. The inode allocation B-tree tracks which inode numbers are free. This eliminates inode exhaustion as a failure mode and allows inode tables to grow with the filesystem's needs.
+
+XFS uses B+ trees pervasively: for block allocation tracking (the free space B-tree contains both a by-block-number tree and a by-size tree, enabling efficient allocation of specific sizes or at specific addresses), for extent maps within files, and for directory entries.
+
+\textbf{XFS delayed logging (XLOG)}: The XFS journal (xlog) is an in-memory log that aggregates metadata changes in memory before committing to disk in large batches. This dramatically reduces journal I/O for metadata-intensive workloads --- creating thousands of files per second generates proportionally less journal traffic. The tradeoff is that more data can be in-flight at any moment; a power loss can result in up to the log buffer's worth of uncommitted metadata being lost, requiring log replay on the next mount.
+
+\textbf{XFS realtime subvolume}: XFS supports a separate realtime subvolume for files requiring guaranteed I/O response time. The realtime subvolume uses a different allocation scheme (extents must be aligned to a specified realtime extent size) that ensures deterministic I/O patterns. This feature is used in specific media and scientific computing environments but is rarely relevant in general enterprise deployments.
+
+\textbf{XFS limitations:} No native snapshots, no native checksumming of data blocks, no native compression. Online shrink of an XFS filesystem is not supported (only online growth). Like ext4, XFS relies on external volume management (LVM, array-level snapshots) for data protection.
+
+\section{Btrfs: The Modern Linux Filesystem}
+Btrfs (B-tree filesystem, pronounced "butter FS" or "better FS") was designed at Oracle beginning in 2007 with the explicit goal of providing ZFS-like features on Linux with a fully open-source license. After years of slow stabilization, Btrfs is now considered stable for most workloads and is the default filesystem on SUSE Linux Enterprise and openSUSE, with Fedora adopting it for desktop installations.
+
+\section{Core Btrfs architecture:}
+Everything in Btrfs is a B-tree. The filesystem is built around a tree of trees: the filesystem tree, the chunk tree (mapping logical addresses to physical locations), the extent tree (tracking all extents and their back-references), the device tree (for multi-device configurations), and checksum trees. This unified B-tree architecture provides clean interfaces for features like snapshots and clones.
+
+\textbf{Copy-on-Write (CoW)}: Btrfs never overwrites data in place. Every write to an existing block results in a new copy being written to a different physical location, with the extent mapping updated to point to the new location. The old location remains valid until all snapshots referencing it are deleted. This CoW semantics is the foundation for snapshots (which are near-instantaneous) and for data integrity (checksums are verified on reads without needing to re-read from the original location).
+
+CoW has a significant implication: databases and other applications that perform in-place updates (updating specific bytes within a file) will generate significant write amplification if the filesystem forces CoW. Btrfs offers the NOCOW attribute that can be set on specific files or directories to disable CoW for those files --- critical for virtual machine image files (QCOW2, VMDK), database data files, and similar applications.
+
+\textbf{Subvolumes}: A Btrfs subvolume is a separately rootable filesystem tree within the Btrfs volume. Subvolumes appear as directories to the operating system but have independent snapshot and send/receive capabilities. A typical Btrfs layout creates separate subvolumes for root (@), home (@home), var/log, and other top-level directories, allowing snapshots to be taken of each independently. The kernel root filesystem resides in a subvolume, allowing the boot loader to specify which subvolume to mount as root --- enabling boot-time rollback.
+
+\textbf{Btrfs RAID}: Btrfs implements its own software RAID in the filesystem layer rather than delegating to MD-RAID or LVM. It supports multiple block profiles: single, DUP (two copies on the same device), RAID0, RAID1 (two copies, any two devices), RAID1C3 (three copies), RAID10, RAID5, and RAID6. The RAID5 and RAID6 implementations have had a long history of bugs, including write hole vulnerabilities (the RAID5 stripe is not written atomically, so a crash during a parity update can leave inconsistent data). As of 2025--2026, Btrfs RAID5/6 is still considered experimental for production use; deployments requiring parity RAID under Btrfs should use MD-RAID at the block level and Btrfs on top.
+
+\textbf{Checksums}: Btrfs checksums all data and metadata blocks by default, using CRC32C (fast, hardware-accelerated on modern CPUs) or optionally xxHash or SHA256. On read, the checksum is verified; a mismatch indicates corruption. Combined with RAID1 or RAID10, Btrfs can automatically repair a corrupted block by reading the good copy from the mirror. This end-to-end checksum protection is the key capability that ext4 and XFS lack.
+
+\textbf{Deduplication and compression}: Btrfs supports online and offline deduplication via extent sharing. Files with identical content can share the same extents on disk. Compression is supported inline (files are transparently compressed on write using zlib, LZO, or zstd) and does not require application modification. Compressed files are read transparently.
+
+\section{Windows Filesystems}
+\section{NTFS: The Windows Enterprise Standard}
+NTFS (New Technology File System) was introduced with Windows NT 3.1 in 1993, designed by Tom Miller and Gary Kimura. It replaced FAT as Windows'{} primary filesystem and has been continuously developed since. The design was influenced by the High Performance File System (HPFS) used in OS/2, though NTFS has evolved far beyond its original design.
+
+\textbf{Master File Table (MFT)}: The conceptual center of NTFS is the Master File Table, a relational database of file records. Every file and directory in the volume has at least one 1 KB record in the MFT. The MFT record stores all metadata --- attributes --- directly within the record if they fit (resident attributes) or as pointers to external clusters (non-resident attributes). Attributes include standard information (timestamps, file flags), filename, data (the actual file content for small files, or an extent list for larger files), security descriptor, index root and allocation (for directories), and others.
+
+The MFT itself is a file (\$MFT) that can grow dynamically. NTFS reserves MFT space and attempts to keep it contiguous to minimize fragmentation of the MFT itself, but on heavily fragmented volumes, MFT fragmentation becomes a performance concern. The MFT Mirror (\$MFTMirr) stores copies of the first few MFT records (including the MFT record itself) at the center of the volume.
+
+\textbf{Journaling (NTFS Log File)}: NTFS maintains a transaction log (\$LogFile) that records metadata changes before they are applied. On mount after an unclean shutdown, the NTFS driver replays the log to restore consistency. The NTFS log covers only metadata --- data changes are not logged, similar to ext4's ordered mode.
+
+\textbf{Alternate Data Streams (ADS)}: NTFS supports multiple data streams within a single file. The default (unnamed) stream contains the file's primary content; additional named streams can coexist on the same file. ADS are used for thumbnail caches, Internet Zone Identifiers (the "Mark of the Web" that Windows applies to files downloaded from the internet), and by various Windows components. ADS data is not visible in directory listings and is often missed by backup solutions, which has led to their abuse for data hiding.
+
+\textbf{Hard links, symbolic links, and junctions}: NTFS supports hard links (multiple directory entries pointing to the same file record), symbolic links (reparse points that redirect to another path), and junction points (directory-level reparse points, similar to symbolic links but with subtly different semantics for traversal).
+
+\textbf{NTFS compression}: NTFS supports transparent per-file or per-folder compression using a modified LZ77 algorithm. The compression operates on 64 KB compression units. While functional, NTFS compression incurs significant CPU overhead and can cause write amplification on SSDs; it is rarely used in modern enterprise environments, replaced by storage-level deduplication and compression.
+
+\textbf{Maximum sizes}: NTFS theoretically supports volumes up to 8 PB (with 64 KB clusters) and files up to the volume size. In practice, Windows limits formatted NTFS volumes to 256 TB. Individual file size is limited to 16 EB theoretically, but Windows limits file size to the volume size.
+
+\section{ReFS: The Resilient File System}
+ReFS (Resilient File System) was introduced with Windows Server 2012, designed to address NTFS's limitations around data integrity, scalability, and resilience. ReFS was designed by the same team that built NTFS, with lessons from ZFS and Btrfs incorporated.
+
+\section{Core design principles of ReFS:}
+\begin{itemize}
+  \item • \textbf{B+ tree everywhere}: ReFS organizes all on-disk structures as B+ trees, replacing the hybrid MFT/index structure of NTFS. Every directory, file extent, and metadata structure is a node in a B+ tree, providing consistent access patterns and uniform integrity checking.
+  \item \textbf{Block integrity streams}: ReFS maintains checksums for all file data and metadata, stored separately from the data in integrity streams. On read, checksums are verified, and with Storage Spaces mirroring, corrupted blocks can be automatically repaired from the mirror.
+  \item \textbf{No in-place updates for most operations}: ReFS uses an allocate-on-write approach for most updates. When a block is modified, a new block is allocated for the updated data before the old block is freed --- similar to CoW in spirit, though ReFS only applies this to metadata in most operational modes. With Integrity Streams enabled, data blocks also use allocate-on-write.
+  \item \textbf{Salvage}: Rather than taking the entire volume offline when corruption is detected, ReFS can salvage the filesystem by excising the corrupted subtree, allowing the rest of the volume to remain available.
+\end{itemize}
+
+\textbf{ReFS Block Cloning}: ReFS supports O(1) block clone operations --- creating a new file that shares blocks with an existing file without physically copying data, with copy-on-write semantics for subsequent modifications. This is used extensively by Hyper-V for VM checkpoint creation and by Windows Update processes.
+
+\textbf{ReFS with Storage Spaces Direct (S2D)}: ReFS is the filesystem of choice for Storage Spaces Direct volumes (Windows Server HCI). The combination of ReFS block integrity, Storage Spaces Direct mirroring, and Windows Storage Bus Layer provides an end-to-end integrity chain comparable to ZFS. Block integrity streams, when enabled, validate every read against a per-block checksum and repair from the mirror automatically.
+
+\textbf{ReFS limitations}: ReFS does not support NTFS features including Alternate Data Streams (for integrity-stream volumes), per-file compression, disk quotas, file system encryption (EFS), hard links, and 8.3 short filenames. It cannot serve as a Windows system (boot) volume. For boot volumes and general-purpose workloads, NTFS remains the only option; ReFS is positioned specifically for high-capacity data volumes.
+
+\section{ZFS: A Deep Dive}
+ZFS (Zettabyte File System) originated at Sun Microsystems in 2001, designed by Jeff Bonwick and Bill Moore with the explicit goal of creating a filesystem without the failure modes of its predecessors. ZFS's design was guided by a simple principle: if the system cannot detect corruption, it will eventually serve corrupted data to applications silently. ZFS achieves this through end-to-end checksums on every block. It was open-sourced as part of OpenSolaris in 2005, ported to FreeBSD and Linux (as OpenZFS), and is now one of the most capable filesystems available on any platform. Understanding ZFS architecture is essential for any storage architect, both for direct deployment and because ZFS's design influenced every subsequent advanced filesystem.
+
+\section{Pool Architecture: vdevs and zpools}
+ZFS fundamentally inverts the traditional OS storage stack. In a traditional stack, the administrator creates hardware RAID sets, partitions the RAID LUN, initializes an LVM physical volume, creates logical volumes, formats filesystems on each LV, and then separately configures snapshots via LVM or a storage array. ZFS collapses this entire stack into a single layer: the zpool, built from vdevs.
+
+A \textbf{vdev} (virtual device) is the basic redundancy unit within a ZFS pool. Vdev types:
+
+\begin{itemize}
+  \item • \textbf{Single disk}: No redundancy. If the disk fails, all data on the vdev is lost (though other vdevs in the pool may be fine). Used for development or scratch data.
+  \item \textbf{Mirror vdev}: Two or more disks containing identical copies of the data. A mirror can lose all but one member and remain functional. Performance for reads is excellent (can read from any member) but sequential write performance is limited to the speed of one disk.
+  \item \textbf{RAID-Z1}: Parity RAID equivalent to RAID-5, but ZFS implements it correctly --- the parity stripe is written atomically at full stripe width, eliminating the RAID-5 write hole. A RAID-Z1 vdev can tolerate one disk failure. Minimum 3 disks.
+  \item \textbf{RAID-Z2}: Dual parity, tolerates two disk failures. Minimum 4 disks. The recommended parity level for most enterprise pools given current drive capacities.
+  \item \textbf{RAID-Z3}: Triple parity, tolerates three disk failures. Minimum 5 disks. Used for very large vdevs or in environments requiring extended rebuild windows (e.g., nearline HDD arrays).
+  \item \textbf{dRAID (Distributed RAID)}: Introduced in OpenZFS 2.1, dRAID distributes the data, parity, and spare capacity across all disks in the vdev. Traditional RAID-Z rebuilds can only read from the parity stripe's specific disks; dRAID rebuilds read from all participating disks in parallel, dramatically reducing rebuild time for large HDDs.
+  \item \textbf{Special allocation class vdev}: A separate vdev (typically NVMe) to which ZFS directs metadata and small blocks. This significantly accelerates metadata-intensive operations (file creation, directory listings, snapshots) when the primary pool uses slow HDDs.
+\end{itemize}
+
+A \textbf{zpool} aggregates one or more vdevs. Data is striped across vdevs at a variable stripe width determined by ZFS. Adding a new vdev to a pool immediately increases available capacity and throughput. ZFS does not support online removal of vdevs (with the exception of mirror vdevs), which is an operational constraint when pool composition needs to change.
+
+\section{Dataset Architecture: Filesystems, Volumes, and Snapshots}
+Within a zpool, ZFS creates datasets --- logical filesystem entities. Dataset types:
+
+\begin{itemize}
+  \item • \textbf{ZFS filesystem}: A mountable POSIX filesystem. Multiple filesystems can exist within a pool, each with independent properties (compression, quota, reservation, encryption, deduplication, case sensitivity). Filesystems can be nested in a hierarchy, inheriting properties from parent datasets.
+  \item \textbf{ZFS volume (zvol)}: A block device exported from ZFS, backed by pool space. Used to provide block storage to iSCSI targets, virtual machine disk images, or swap partitions. Zvols benefit from all ZFS pool features (checksumming, replication, snapshots).
+  \item \textbf{Snapshot}: A read-only point-in-time copy of a dataset. Snapshots are instantaneous (O(1)) because ZFS uses CoW --- the snapshot simply preserves all currently live block references. No data is copied at snapshot creation time. Space is consumed only as the live dataset diverges from the snapshot (old blocks referenced by the snapshot are not freed until all snapshots referencing them are destroyed).
+  \item \textbf{Clone}: A writable snapshot. A clone is a new dataset that shares blocks with the snapshot it was cloned from, with CoW semantics for subsequent modifications. Clones are commonly used for provisioning thin copies of databases or VM images for testing.
+  \item \textbf{Bookmark}: A lightweight reference to a snapshot that preserves only the transaction group ID. Bookmarks consume no significant space and can be used as replication references even after the source snapshot is destroyed.
+\end{itemize}
+
+\section{The Adaptive Replacement Cache (ARC)}
+ZFS implements its own in-memory read cache called the ARC, bypassing the traditional Linux page cache (for the native ZFS on Linux implementation). The ARC can consume a configurable portion of available system DRAM (defaulting to approximately 50\% of RAM on Linux, tunable via zfs\_arc\_max).
+
+The ARC uses an adaptive replacement algorithm that maintains two primary lists: a Most Recently Used (MRU) list and a Most Frequently Used (MFU) list. New cache entries enter the MRU list. Entries that are accessed again move to the MFU list. The balance between MRU and MFU is dynamically adjusted based on workload: if the current workload exhibits temporal locality (accessing data recently used), the ARC favors MRU; if it exhibits frequency locality (repeatedly accessing the same data), the ARC favors MFU. This makes ARC significantly more intelligent than a simple LRU cache at handling workload shifts.
+
+The ARC also maintains a ghost list --- a record of recently evicted entries (the entries themselves are not stored, only their identifiers). If a ghost entry is requested, it is promoted back into cache and the ARC uses this information to adjust its MRU/MFU balance. This ghost mechanism is what allows ARC to adapt to workload changes dynamically.
+
+\textbf{L2ARC}: A second-level cache on a fast device (NVMe SSD) that holds blocks evicted from the ARC. L2ARC is a read cache only; writes go directly to the pool's vdevs. The L2ARC is useful when the working set is too large for DRAM but fits on a flash device. L2ARC metadata is stored in the ARC, so a very large L2ARC that requires more metadata than the ARC can hold becomes counterproductive. L2ARC is also lost on system restart (it is not persistent between boots in most configurations, though ZFS 2.0+ introduced L2ARC persistence).
+
+\section{The ZFS Intent Log (ZIL) and SLOG}
+ZFS provides synchronous write guarantees for applications that issue fsync() or use O\_SYNC. When an application issues a synchronous write, ZFS must commit the data durably before acknowledging the write. ZFS handles this through the ZFS Intent Log (ZIL): synchronous writes are written to the ZIL, which is flushed to stable storage, and then the acknowledgment is returned to the application. The actual pool write happens later in the normal transaction group commit process.
+
+By default, the ZIL is allocated within the main pool's vdevs. On a pool backed by HDDs, synchronous writes therefore have HDD latency (8--12 ms per operation). This makes ZFS with HDDs unsuitable for synchronous workloads without a dedicated ZIL device.
+
+A \textbf{SLOG} (Separate Intent Log) is a dedicated vdev used exclusively for the ZIL. Adding a SLOG (typically a small, high-endurance NVMe SSD mirrored for reliability) moves ZIL writes to the SSD, achieving NVMe latency (50--100 µs) for synchronous writes even on an HDD-backed pool. The SLOG must be highly reliable and power-loss-safe --- if the SLOG fails and the main pool had not yet committed the ZIL transactions, data can be lost. For this reason, SLOG devices should be enterprise-grade SSDs with power-loss protection capacitors, and they should be mirrored.
+
+\section{End-to-End Data Integrity: Checksums and Scrub}
+Every data and metadata block in a ZFS pool carries a 256-bit or 512-bit checksum (selectable per dataset from SHA-256, SHA-512, Skein, Edon-R, or Blake3). Checksums are stored in the block's parent (the block pointer), not in the block itself --- a design choice that means a block cannot falsely attest its own integrity.
+
+When ZFS reads a block, it computes the checksum and compares it to the stored value. A mismatch triggers automatic repair: ZFS reads the same block from an alternate source (a mirror member, or a reconstructed parity copy), verifies the alternate reads correctly, and uses it to overwrite the corrupted block. This process is transparent to the application.
+
+\textbf{Scrub} is a background operation that reads every block in the pool and validates all checksums. ZFS scrub should be run regularly (weekly is common for production pools) to detect and repair corruption before it propagates or accumulates. Silent data corruption on spinning media, known as "bit rot," occurs at a rate that is meaningful across a large pool over a year --- ZFS scrub is the defense against it.
+
+\section{ZFS Snapshots and Replication}
+The combination of ZFS snapshots with zfs send/receive provides a powerful and efficient replication mechanism. zfs send serializes a snapshot's data into a stream (either a full send or an incremental send from a common previous snapshot). zfs receive applies the stream to a target pool, creating an exact replica.
+
+Incremental sends transmit only the blocks that changed between two snapshots --- the system walks the block tree and identifies changed block pointers. For a pool that changes slowly relative to its total size, incremental sends are orders of magnitude smaller than full copies. This mechanism underlies most ZFS-based disaster recovery and offsite backup workflows.
+
+\section{Copy-on-Write Semantics and Snapshots}
+The CoW architecture shared by ZFS and Btrfs deserves additional analysis because it fundamentally changes the operational model for snapshots and backup.
+
+In a traditional filesystem (ext4, XFS, NTFS), a snapshot requires either a freeze-copy-unfreeze operation on the live filesystem or a separate volume snapshot mechanism (LVM or storage array). The snapshot must capture the state of all data blocks at a point in time, which typically requires quiescing writes temporarily.
+
+In a CoW filesystem, every write creates a new block rather than overwriting the old one. A snapshot is simply a reference to the current set of block pointers --- no data is copied, and no freeze is necessary. The snapshot is instantaneous and adds no I/O load to the system at creation time. As subsequent writes occur, new blocks are allocated while the snapshot retains references to the original blocks. Space consumption by snapshots is exactly proportional to the divergence between the snapshot and the current state.
+
+The operational implications are significant:
+
+\begin{itemize}
+  \item • \textbf{High-frequency snapshots are practical}: Because snapshots are O(1), taking 96 snapshots per day (every 15 minutes) has virtually no performance impact. Traditional snapshot approaches that required physical block copies had to limit snapshot frequency.
+  \item \textbf{Snapshot space is predictable}: Each snapshot consumes space equal to the data that has been modified or deleted since it was taken. A snapshot of a static dataset consumes no additional space indefinitely.
+  \item \textbf{Clone provisioning is fast}: Creating a writable clone of a 10 TB dataset takes seconds, not hours, and consumes no additional space until the clone diverges from the source.
+\end{itemize}
+
+The caveat is that CoW increases metadata complexity: for every modified block, the block pointer must be updated, and since block pointers are themselves stored in blocks, those parent blocks must also be CoW-ed, potentially cascading up the tree. ZFS handles this with a transaction group model where all changes within a transaction group commit atomically. Btrfs uses B-tree path copying for the same effect.
+
+\section{Filesystem Metadata Management and Consistency Models}
+\section{POSIX fsync and Data Durability Guarantees}
+POSIX defines fsync() as causing all modified data and metadata for a file to be written to permanent storage before returning. However, the actual semantics are weaker than often assumed. fsync() on a regular file guarantees that the file's data and inode are durable, but it does not guarantee that the directory entry pointing to the file is durable --- that requires fsync() on the directory. This distinction matters for crash-consistent file creation: to guarantee a new file is durable and findable after a crash, applications must fsync the file, then fsync its parent directory.
+
+Applications that rely on rename()-based atomic update patterns (write to temporary file, then rename into place) must be aware that the rename itself must be committed durably. On some filesystems in some configurations, even after fsync() on the renamed file, the directory entry update may not be durable until the directory is explicitly fsync'd or the filesystem flushes its journal.
+
+Database systems and transaction logs that require strict ordering guarantees typically use O\_DIRECT \textbar{} O\_DSYNC or O\_DIRECT \textbar{} O\_SYNC flags, bypassing the page cache and ensuring each write is durably committed before the next begins. Understanding these POSIX semantics and their filesystem-specific implementations is essential for database administrators and storage architects supporting transactional applications.
+
+\section{Security \& Governance}
+\section{POSIX Permissions and Access Control Lists}
+The traditional UNIX permission model assigns each file an owner (UID) and group (GID), with separate read (r), write (w), and execute (x) permissions for owner, group, and others (world). This nine-bit permission model, expressed as a three-digit octal number (e.g., 0644, 0755), is the baseline access control for every Linux filesystem.
+
+The setuid (SUID, bit 4000) and setgid (SGID, bit 2000) bits allow a program to run with the privileges of its owner or group, regardless of who executes it. These bits are a common attack surface: a world-executable SUID root binary that has an exploitable vulnerability allows privilege escalation. The sticky bit (bit 1000) on a directory prevents users from deleting files owned by others --- the /tmp directory carries the sticky bit for this reason.
+
+\textbf{POSIX ACLs} extend the basic three-way model to allow per-user and per-group permissions on individual files. A file can have ACL entries granting user alice read access and user bob read-write access, independent of the file's owner/group/other settings. POSIX ACLs are defined in POSIX.1e (which was never officially published but whose draft has been widely implemented) and are supported by ext4, XFS, Btrfs, and ZFS via setfacl/getfacl. They are stored as extended attributes on the inode.
+
+\textbf{NFSv4 ACLs} are richer than POSIX ACLs, supporting inheritance semantics (new files and directories under a directory inherit ACL entries from the parent), finer-grained permissions (SYNCHRONIZE, WRITE\_OWNER, WRITE\_DAC, and more), and deny entries. ZFS uses NFSv4-style ACLs natively, which is relevant for environments mixing UNIX and Windows clients.
+
+\section{Filesystem-Level Encryption}
+\textbf{LUKS (Linux Unified Key Setup)} is the standard for block device encryption on Linux, implemented via the dm-crypt device mapper target. LUKS operates below the filesystem: the entire block device (or partition, or LVM logical volume) is encrypted, and the filesystem sees only decrypted blocks. LUKS version 2 (the current standard, introduced in 2018) supports:
+
+\begin{itemize}
+  \item • AES-XTS-plain64 as the cipher mode (XTS provides better security than CBC for disk encryption)
+  \item Multiple keyslots (up to 32 in LUKS2), allowing multiple passphrases or key files to unlock the same volume
+  \item JSON header with metadata including cipher, mode, key size, and keyslot parameters
+  \item Argon2id key derivation function for passphrase slots, providing GPU-resistant brute-force protection
+  \item Token support for integration with hardware security modules, systemd-cryptenroll (TPM2), and PKCS\#11 devices
+\end{itemize}
+
+LUKS2 volumes can be unlocked from TPM2 using systemd-cryptenroll, which seals the volume's master key to specific TPM PCR values. If the system's measured boot state changes (UEFI configuration, boot loader, kernel, or initramfs changes), the TPM will refuse to unseal the key, forcing recovery with a backup passphrase.
+
+\textbf{BitLocker} is Microsoft's full-volume encryption for NTFS and ReFS volumes. BitLocker uses AES-CBC-128 (default) or AES-XTS-128/256 (available in Windows Server 2016+ and Windows 10 v1511+). In BitLocker TPM mode, the volume master key (VMK) is sealed by the TPM to specific PCR values representing the system's boot configuration. BitLocker supports multiple protector types: TPM, TPM+PIN, recovery password, startup key (USB), and network unlock (for server scenarios where TPM unlocking should only succeed if the server is on the corporate network).
+
+BitLocker on Windows Server is typically managed via Group Policy or Microsoft Endpoint Configuration Manager. The recovery key should be escrowed in Active Directory (via BitLocker Recovery Password Viewer) or Azure AD / Microsoft Intune for managed devices.
+
+\textbf{fscrypt} is a Linux kernel framework for per-directory (per-file-tree) encryption at the filesystem layer, rather than at the block layer. fscrypt is supported by ext4, F2FS, and Btrfs. Unlike LUKS, fscrypt encrypts individual file contents and filenames independently, and different directories can be encrypted with different keys. fscrypt is designed for multi-user filesystems where different users or applications need separate encryption domains --- Android's file-based encryption uses fscrypt, as does Chrome OS. In enterprise Linux, fscrypt is less common than LUKS but relevant for shared-filesystem scenarios.
+
+\textbf{ZFS native encryption}: ZFS supports per-dataset encryption, introduced in OpenZFS 0.8 (2019). Each encrypted dataset uses a randomly generated data encryption key (DEK), which is wrapped with a key-wrapping key (KWK) derived from either a passphrase, a raw key file, or a PKCS\#11 hardware security module. Snapshots and clones of encrypted datasets inherit the parent's DEK; new datasets in the same pool can have entirely independent encryption keys. ZFS native encryption is transparent to applications and compatible with all ZFS features including compression and deduplication.
+
+\section{Immutable Files and Append-Only Flags}
+Linux filesystems support extended file attributes that go beyond standard POSIX permissions. The chattr command sets immutable (+i) or append-only (+a) attributes on files:
+
+\begin{itemize}
+  \item • \textbf{Immutable (`+i`)}: The file cannot be modified, renamed, deleted, hard-linked to, or symlinked from, even by root. The superblock-level CAP\_LINUX\_IMMUTABLE capability is required to change this attribute.
+  \item \textbf{Append-only (`+a`)}: The file can only be opened for appending --- existing content cannot be modified. Used for log files in high-security environments.
+\end{itemize}
+
+These attributes are supported by ext4 and XFS. Btrfs has partial support. ZFS implements analogous behavior via the immutable and appendonly file flags, and also supports dataset-level properties like readonly.
+
+In ransomware-resilience scenarios, making backup repositories or critical configuration files immutable provides an additional layer of protection: even a process running as root (which may be compromised) cannot modify or delete the files. This is often combined with time-delayed auto-unlock mechanisms where the immutable flag is set by a scheduler and can only be cleared after a delay, preventing ransomware that immediately tries to delete backups from succeeding.
+
+\textbf{Linux Security Modules (LSM)}: SELinux and AppArmor provide mandatory access control (MAC) policies that can restrict filesystem access beyond what discretionary access controls (DAC --- POSIX permissions and ACLs) allow. SELinux labels every file with a security context (user:role:type:level), and the access policy specifies which processes (by their own security context) can access which files. A web server process labeled httpd\_t can only read files labeled httpd\_content\_t or httpd\_sys\_content\_t, even if the traditional POSIX permissions would allow broader access. Correctly configured SELinux is highly effective at containing the blast radius of application compromises; misconfigured or permissive SELinux provides no benefit.
+

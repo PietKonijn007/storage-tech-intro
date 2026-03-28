@@ -1,0 +1,321 @@
+\part{PARALLEL AND HIGH-PERFORMANCE FILESYSTEMS}
+
+\chapter{Parallel Filesystems --- Architecture and Use Cases}
+\label{ch:8}
+
+% NOTE: Parallel filesystem content (Lustre, GPFS, BeeGFS, WekaFS)
+% is currently in Chapter 7. Content needs to be split.
+% For now, referencing the same SDS chapter content.
+
+The evolution from monolithic storage arrays to distributed, software-defined storage systems represents one of the most significant architectural shifts in enterprise infrastructure over the past two decades. Where traditional storage arrays coupled proprietary hardware with embedded firmware into vertically integrated appliances, distributed storage unbundles those functions: placing commodity servers in service as storage nodes, managing data across them through sophisticated software layers, and scaling by adding nodes rather than by replacing hardware. This chapter examines the foundational theory that governs distributed storage behavior, explores the major parallel filesystem and software-defined storage platforms, analyzes the scale-out NAS landscape, and dissects the data placement and metadata management algorithms that make large-scale distributed storage systems practical.
+
+\section{The CAP Theorem and Distributed Storage Fundamentals}
+\section{Understanding CAP in the Storage Context}
+Eric Brewer's CAP theorem, formally proven by Gilbert and Lynch in 2002, states that a distributed data system cannot simultaneously guarantee all three of the following properties: Consistency (every read receives the most recent write or an error), Availability (every request receives a response, even if it may not be the most recent data), and Partition Tolerance (the system continues operating even when network partitions prevent some nodes from communicating with others).
+
+For practitioners designing or selecting storage systems, the theorem's most important implication is not the impossibility of achieving all three simultaneously --- network partitions are an empirical reality in any distributed system, so partition tolerance is effectively non-negotiable --- but rather the forced trade-off between consistency and availability during a partition event. A storage system that prioritizes consistency during a partition will refuse to serve reads or writes until the partition heals and data can be verified coherent across all replicas. A system that prioritizes availability will continue serving requests but may return stale data or permit diverging writes that must later be reconciled.
+
+In practice, distributed storage systems occupy a spectrum rather than a binary position. Most enterprise distributed storage systems are classified as CP (consistency over availability) or AP (availability over consistency), but the reality is more nuanced. Ceph, for example, makes pools unavailable when a quorum of OSDs cannot be reached, prioritizing consistency. GlusterFS can be configured for either consistency or eventual consistency depending on the translator stack. Many scale-out NAS systems maintain strong consistency within a cluster but offer eventual consistency for geographically distributed global namespaces.
+
+\section{Consistency Models in Distributed Storage}
+Beyond the binary of CAP, distributed storage systems offer a range of consistency guarantees that practitioners must understand when matching a storage platform to its intended workload.
+
+\textbf{Strong consistency} (also called linearizability) guarantees that all reads reflect the most recent write, as if the storage were a single atomic unit. Systems providing strong consistency --- typically CP systems --- accomplish this through distributed locking, two-phase commit protocols, or quorum-based reads and writes. The performance cost is real: every write operation may require coordination across multiple nodes before being acknowledged, and reads may require a consistency check before being served.
+
+\textbf{Sequential consistency} is a slightly weaker model where all operations appear to have executed in some sequential order, consistent across all nodes, but that order need not match real-time ordering. This model is sufficient for many applications and less expensive to implement than linearizability.
+
+\textbf{Causal consistency} preserves ordering among related operations (operations that have a cause-and-effect relationship), while permitting unrelated operations to be observed in different orders by different nodes. Some distributed databases and eventually some distributed filesystems have adopted causal consistency as a practical middle ground.
+
+\textbf{Eventual consistency} guarantees that, in the absence of further writes, all replicas will eventually converge to the same value. The "eventually" is undefined and can range from milliseconds in a well-connected LAN to minutes or longer in a geographically distributed system. Eventual consistency dramatically simplifies the write path --- a write is acknowledged as soon as it lands on one or more replicas, and background processes propagate changes. The exposure to stale reads is the trade-off.
+
+\textbf{Read-your-writes consistency} is a client-side session guarantee: a client that writes a value will always read back that same value in subsequent reads, even if other clients may not yet see it. Many distributed file protocols implement this guarantee because applications almost universally expect it.
+
+\section{PACELC: Extending the Model}
+The PACELC theorem, proposed by Daniel Abadi, extends CAP by recognizing that the consistency-availability trade-off is not limited to partition scenarios. Even in the absence of a partition --- the normal operating condition --- there is an inherent trade-off between latency and consistency. A system that synchronously replicates a write to three nodes before acknowledging it is more consistent but slower than one that acknowledges after writing to one node and replicates asynchronously. PACELC formalizes this: Partition $\rightarrow$ tradeoff between Availability and Consistency; Else $\rightarrow$ tradeoff between Latency and Consistency.
+
+For enterprise architects, PACELC provides a more complete framework for evaluating storage systems. A high-frequency trading workload may demand EL (low latency) even at the cost of potential inconsistency windows. A financial ledger demands EC (strong consistency) even if it means higher latency on each write. Most enterprise storage systems position themselves on this spectrum implicitly, and understanding where each product sits helps avoid painful mismatches between application requirements and storage behavior.
+
+\section{Parallel Filesystems for High-Performance Computing}
+Parallel filesystems were developed specifically to address the I/O demands of high-performance computing (HPC) workloads --- large-scale scientific simulations, genomics pipelines, seismic analysis, and weather modeling --- where aggregate bandwidth measured in hundreds of gigabytes per second is required and sequential large-file I/O dominates. These systems take a fundamentally different approach from general-purpose NAS, separating metadata management from data movement and enabling simultaneous access from thousands of compute nodes to shared files.
+
+\section{IBM Spectrum Scale (GPFS)}
+IBM General Parallel File System, now marketed as IBM Spectrum Scale, was introduced in the early 1990s and has evolved into one of the most capable and widely deployed parallel filesystems in the HPC and enterprise space. Its architecture is notable for using a distributed metadata approach: multiple metadata servers (called manager nodes) share responsibility for namespace operations, avoiding the single metadata server bottleneck that afflicts simpler parallel filesystems.
+
+Spectrum Scale organizes storage as a collection of Network Shared Disks (NSDs) --- logical storage devices that can be backed by local disks, SAN volumes, or other storage subsystems --- which are pooled into storage pools and assigned to filesets (subtree namespaces that can be independently managed, migrated, and governed). The filesystem distributes data across NSDs in stripes, with configurable stripe size and replication factor per fileset.
+
+The \textbf{distributed token management} mechanism is central to Spectrum Scale's consistency model. Tokens are held by nodes for specific operations (read, write, metadata) and must be obtained from a token manager before proceeding. This prevents conflicting operations from proceeding simultaneously across different nodes, ensuring coherent shared access. Token management adds latency for highly concurrent small-file workloads but is essentially transparent for the large, sequential I/O patterns that Spectrum Scale is optimized for.
+
+Spectrum Scale's \textbf{Active File Management (AFM)} feature implements a global namespace with cache semantics: remote data can appear locally mounted, with background prefetch and writeback. This is particularly valuable for hybrid cloud scenarios where data may reside in cloud object storage (via cloud gateway) and needs to appear as a local filesystem to compute jobs.
+
+The product's strength lies in its flexibility and enterprise feature set: per-fileset encryption, immutable file support, Hadoop HDFS compatibility mode, transparent tiering to object storage, and integration with IBM Spectrum Protect for data management. Spectrum Scale is typically found in financial services, oil and gas, healthcare genomics, and research computing environments requiring petabyte-scale shared storage with enterprise governance.
+
+\section{Lustre}
+Lustre is an open-source parallel filesystem originally developed by Cluster File Systems and later contributed to the open-source community. It is the dominant parallel filesystem in TOP500 supercomputing installations and is the reference platform for extreme-bandwidth HPC workloads. Its architecture separates three distinct server roles.
+
+\textbf{Metadata Servers (MDS)} with their \textbf{Metadata Targets (MDT)} handle all namespace operations: directory lookups, file creates, stat operations, file open/close. In traditional Lustre deployments, a single active MDS was a significant architectural limitation, representing both a single point of failure and a performance ceiling for metadata-intensive workloads. Lustre 2.4 introduced \textbf{Distributed Namespace (DNE)}, allowing multiple MDTs and distributing directory subtrees across them, with subsequent releases adding striped directories that can shard even a single directory across multiple MDTs for workloads generating millions of small files.
+
+\textbf{Object Storage Servers (OSS)} with their \textbf{Object Storage Targets (OST)} hold the actual file data. Files are striped across multiple OSTs, with stripe count and stripe size configured per file or directory. A file's data stripe is interleaved across its OSTs at the configured stripe width. With hundreds of OSTs and a well-tuned stripe configuration, Lustre deployments at major supercomputing centers regularly achieve aggregate bandwidths exceeding 1 TB/s.
+
+\textbf{Management Servers (MGS)} maintain configuration information for one or more Lustre filesystems and are typically co-located with the MDS.
+
+The \textbf{Lustre Distributed Lock Manager (LDLM)} provides cache coherence across all clients. When a client reads a file, it acquires a lock on the data extent from the MDS. Other clients attempting to modify that extent must first revoke the existing lock. This mechanism enables aggressive client-side read caching while preserving coherence.
+
+Lustre's weakness has historically been in metadata performance for workloads generating large numbers of small files --- the classic HPC checkpoint problem --- and in operational complexity. Managing Lustre at scale requires expertise that many enterprise IT teams lack, which has contributed to the rise of more operationally friendly alternatives.
+
+\section{BeeGFS}
+BeeGFS (previously FhGFS, developed by the Fraunhofer Institute for Industrial Mathematics) takes a pragmatic approach to parallel filesystem design, optimizing for operational simplicity and excellent performance across mixed workload types while remaining deployable on commodity hardware without specialized expertise.
+
+BeeGFS fully distributes both data and metadata across all storage nodes, with no architectural separation between metadata and data services --- any node can run both a metadata daemon and a storage daemon. Metadata is distributed across all metadata nodes using a consistent hashing approach, assigning files to metadata nodes based on their inode number. This distributes metadata operations uniformly and eliminates the metadata bottleneck that affects centralized MDS architectures.
+
+The \textbf{striping architecture} in BeeGFS is fully configurable per directory or file: data is striped across a configurable number of storage targets at a configurable chunk size. For large sequential workloads, a larger chunk size (512KB, 1MB) reduces metadata overhead. For small random I/O, a smaller chunk size may reduce wasted space.
+
+BeeGFS's key differentiator from Lustre and GPFS is its \textbf{ease of deployment and operation}. Installation is straightforward on standard Linux distributions, the management interface is web-based, and the system can be running in a matter of hours on commodity server hardware. This accessibility has made BeeGFS popular in mid-tier HPC installations, enterprise AI/ML clusters, and manufacturing environments that need high-throughput shared storage without dedicated HPC storage administrators.
+
+BeeGFS provides an optional high-availability layer through buddy mirroring: metadata and data targets can be paired, with changes synchronously mirrored between the pair. If one target fails, its buddy continues serving data. This provides resilience without the complexity of external replication management.
+
+\section{Software-Defined Storage: Ceph}
+Ceph is arguably the most architecturally significant distributed storage system of the past fifteen years, representing a complete reimagining of how storage should work at scale. Developed by Sage Weil for his doctoral dissertation at UC Santa Cruz and subsequently commercialized through Inktank (later acquired by Red Hat), Ceph provides block storage, file storage, and object storage from a single unified storage cluster, all built atop a common distributed object store called RADOS.
+
+\section{RADOS: The Reliable Autonomic Distributed Object Store}
+RADOS is the foundational layer of Ceph --- a distributed object store that manages its own data placement, replication, and recovery without any centralized controllers. Understanding RADOS is essential to understanding every layer above it.
+
+The RADOS cluster consists of two types of daemons:
+
+\textbf{Object Storage Daemons (OSDs)} are the workhorses of the cluster. Each OSD manages one storage device (typically one OSD per physical drive, though NVMe devices may justify multiple OSDs per drive to saturate their parallelism). OSDs are responsible for storing data objects on their local devices, replicating data to peer OSDs, detecting and reporting failures in peer OSDs through a heartbeat mechanism, and recovering from failures by re-replicating data when a peer OSD goes down. The OSD daemon stack has evolved significantly: the original file-based FileStore backend has been replaced in modern Ceph by \textbf{BlueStore}, which bypasses the host filesystem entirely and manages the block device directly. BlueStore provides checksumming at the object level, inline compression, and significantly improved write performance (particularly for erasure-coded pools) by eliminating the double-write penalty inherent in journaling filesystems.
+
+\textbf{Monitor daemons (MONs)} maintain the authoritative cluster state in the form of a set of cluster maps: the monitor map, OSD map, placement group (PG) map, CRUSH map, and MDS map (for CephFS). Monitors use a Paxos consensus algorithm to maintain quorum and ensure all cluster state changes are agreed upon by a majority before being committed. An odd number of monitors (typically three or five) is required for quorum. The critical insight about monitors is that \textbf{they do not participate in the data path} --- they do not proxy I/O or hold data. Their role is purely coordination and cluster state management.
+
+\section{CRUSH: Controlled Replication Under Scalable Hashing}
+CRUSH (Controlled Replication Under Scalable Hashing) is the algorithm by which Ceph computes data placement without lookup tables. It is one of Ceph's most distinctive and important innovations.
+
+When a client wants to store or retrieve a named object, the sequence of operations is:
+
+\begin{itemize}
+  \item 1. The object name is hashed to determine its \textbf{Placement Group (PG)} number. PGs are an intermediate abstraction between individual objects (which can number in the billions) and OSDs. A pool is divided into a configurable number of PGs (typically hundreds to thousands), and each object maps to exactly one PG.
+2. The PG number is fed into the \textbf{CRUSH algorithm} along with the current \textbf{CRUSH map} to deterministically compute which OSDs should hold the replicas (or erasure code fragments) for that PG.
+3. The client contacts the \textbf{primary OSD} for that PG directly, with no intermediary proxy or broker.
+\end{itemize}
+
+The CRUSH map is a hierarchical description of the physical topology of the cluster. The hierarchy consists of \textbf{devices} (individual OSDs) at the leaves and \textbf{buckets} at the internal nodes. Default bucket types include host, rack, row, room, datacenter, and zone, though custom types can be defined. Each device has a \textbf{weight} proportional to its storage capacity. CRUSH \textbf{rules} define placement policies in terms of this hierarchy --- for example, "place three replicas, one per distinct rack" --- and the CRUSH algorithm traverses the hierarchy, making pseudo-random selections at each level according to the weights, to produce the final OSD list.
+
+The principal benefit of CRUSH over lookup table-based placement is that the placement computation is \textbf{deterministic and distributed}: any client or OSD can independently compute where any object should be stored, without consulting a central directory. This eliminates the lookup table as a performance bottleneck and single point of failure. The trade-off is that adding or removing OSDs (which changes weights in the CRUSH map) triggers data migration as some PGs are remapped to different OSDs.
+
+To control the extent of data migration during cluster changes, Ceph supports \textbf{weight sets} and the balancer module, which can adjust the effective weights to minimize unnecessary data movement. CRUSH tunable profiles have evolved over Ceph's history --- from argonaut through bobtail, firefly, hammer, to jewel --- progressively improving the quality of data distribution and reducing unnecessary PG remapping when OSDs fail.
+
+\section{Placement Groups: Balancing Granularity and Overhead}
+The placement group layer exists because mapping billions of objects directly to OSDs through CRUSH would result in excessive recomputation and tracking overhead, while maintaining one PG per object would mean millions of PGs each with its own replication state machine. PGs represent a sweet spot: each pool has enough PGs to distribute data evenly across OSDs (a common target is 100--200 PGs per OSD), but few enough that the cluster can track and manage their state efficiently.
+
+Every PG has a state (active, clean, degraded, recovering, undersized, etc.) tracked by the monitors, and each PG's primary OSD is responsible for coordinating reads, writes, and recovery for all objects in that PG. The total number of PGs in a cluster must be tuned based on cluster size --- too few PGs results in uneven distribution; too many consumes excessive memory on OSDs and monitors.
+
+\section{CephFS: The Metadata Overlay}
+CephFS provides a POSIX-compliant filesystem on top of RADOS. It uses RADOS for data storage, storing file data as RADOS objects, and adds a \textbf{Metadata Server (MDS)} layer for the filesystem namespace. The MDS manages directory trees, inodes, and file metadata, serving filesystem metadata requests from clients.
+
+CephFS's key architectural advancement over simpler parallel filesystems is \textbf{dynamic subtree partitioning}: the MDS cluster can distribute different directory subtrees across multiple active MDS nodes, adapting the distribution in response to load. A heavily accessed directory subtree will be migrated to a less loaded MDS, or split across multiple MDS nodes if load warrants. This provides effective load balancing for metadata workloads without requiring manual partition planning.
+
+CephFS clients use a kernel module or FUSE-based client, and the client caches both data and metadata aggressively. Cache coherence is maintained through \textbf{capabilities}: the MDS grants clients capabilities for specific operations on specific inodes, and must revoke those capabilities before granting conflicting access to other clients. The client's read capability includes a data version, allowing the client to serve reads from cache without consulting the MDS for every operation.
+
+Multiple MDS daemons can be configured, with some active (serving metadata) and others in standby (ready to take over if an active MDS fails). In larger deployments, multiple active MDS daemons operate simultaneously, each responsible for a portion of the namespace.
+
+\section{Ceph Block Device (RBD)}
+RADOS Block Device presents block storage on top of RADOS by striping a virtual block device across multiple RADOS objects, typically at 4MB per object. RBD volumes integrate naturally with Linux (via the librbd library and the rbd kernel module), QEMU/KVM, and OpenStack Cinder and Nova. Snapshots are implemented as copy-on-write clones at the RADOS object level --- a snapshot captures the set of RADOS objects as of a point in time, and subsequent writes go to new objects or new object generations. Layering (cloning a snapshot to create a new thin-provisioned RBD image sharing objects with its parent) is fundamental to efficient VM provisioning in cloud environments.
+
+RBD supports both replication pools and erasure-coded data pools (with a replicated metadata pool), the latter providing better storage efficiency for capacity-heavy workloads at the cost of increased CPU overhead and higher write latency.
+
+\section{Ceph Object Gateway (RGW)}
+RGW provides S3-compatible and Swift-compatible object storage interfaces on top of RADOS. It functions as a full S3 API implementation: buckets, objects, multipart uploads, versioning, lifecycle policies, server-side encryption, access control lists, and bucket policies are all implemented. RGW translates S3 API operations into RADOS operations, storing object data as RADOS objects and maintaining bucket and object metadata in dedicated RADOS pools.
+
+RGW supports multi-site deployment with zone groups and zones, implementing asynchronous replication between geographic sites for disaster recovery and geographic data locality. Active-active multi-site configurations allow clients at different geographic locations to write to the nearest site, with data subsequently synchronized across all sites.
+
+\section{GlusterFS}
+GlusterFS, originally developed by Gluster Inc. and later acquired by Red Hat, takes a different architectural philosophy from Ceph. Rather than building a new distributed object store and layering protocols on top, GlusterFS aggregates existing filesystems --- treating directories on standard Linux filesystems as \textbf{bricks} --- into larger volumes through a translator architecture.
+
+A GlusterFS volume is a logical collection of bricks, assembled through a stack of user-space translators. The translator stack is the core abstraction: each translator is a shared library implementing filesystem operations (create, read, write, stat, etc.) and passing calls up or down the stack. I/O from clients passes through the translator stack on the client side, and is routed to the appropriate brick (or bricks) based on the translator logic.
+
+The two most important cluster translators are:
+
+\textbf{DHT (Distributed Hash Table)}: DHT distributes files across bricks by hashing each file's name to a 32-bit value and mapping that value to a brick or brick subvolume. Each brick is assigned a contiguous range within the 32-bit hash space, covering the full space without gaps or overlaps. A file is stored on exactly the brick whose range contains the file's hash value --- distribution is a routing function, not striping. When a brick is added or removed, hash ranges are redistributed, and files may need to be migrated to their new target bricks through a rebalance operation.
+
+\textbf{AFR (Automatic File Replication)}: AFR implements synchronous replication across a set of bricks, functioning as a distributed RAID-1. Writes are fanned out to all bricks in the replica set before being acknowledged. Reads are served from any brick in the set. AFR uses a change log-based self-healing mechanism: each brick tracks pending changes in extended attributes, and a self-heal daemon runs in the background to detect and repair inconsistencies between replicas.
+
+These translators can be combined: a \textbf{distributed-replicated} volume first replicates files across N bricks (AFR) and then distributes files across replica groups (DHT), providing both redundancy and distribution. A \textbf{dispersed} volume uses erasure coding across bricks, providing storage efficiency comparable to RAID-6.
+
+GlusterFS's greatest strength is its relative simplicity and its ability to reuse existing Linux filesystems (XFS is the strongly preferred underlying filesystem for bricks). Its weaknesses include metadata operations being handled through the DHT translator without a dedicated metadata service --- for operations like directory listings or stat calls, the client must often query multiple bricks --- and suboptimal performance for small-file workloads compared to purpose-built distributed filesystems.
+
+\section{Scale-Out NAS}
+Scale-out NAS systems extend traditional NAS capabilities --- POSIX filesystem semantics, NFS/SMB protocol support, rich data management --- to cluster architectures that can grow from tens of terabytes to multiple petabytes within a single namespace. Unlike parallel filesystems designed primarily for HPC bandwidth, scale-out NAS targets the broader enterprise NAS workload: VMware datastores, home directories, content repositories, backup targets, and mixed workloads.
+
+\section{NetApp ONTAP Cluster Mode}
+ONTAP's cluster architecture allows up to 24 nodes (for NAS workloads) in a single cluster, all sharing a common namespace. Nodes are organized as HA pairs (two controllers sharing a disk shelf, providing automated failover if one controller fails), and multiple HA pairs are joined into a cluster through a private, dedicated cluster interconnect (historically 10GbE, now 100GbE on high-end systems).
+
+The fundamental virtualization layer in ONTAP is the \textbf{Storage Virtual Machine (SVM)}, formerly called a Vserver. An SVM is a logically separate NAS server with its own namespace, protocol configurations, IP addresses, and authentication context. Multiple SVMs can coexist on the same cluster, each isolated from the others, enabling multi-tenancy. The cluster administrator manages hardware, nodes, and aggregate-level storage, while SVM administrators manage volumes and data within their SVMs.
+
+\textbf{Logical interfaces (LIFs)} are virtual network endpoints associated with SVMs. LIFs are bound to physical network ports on specific nodes but can be migrated to other nodes or ports without interrupting client access --- this is the mechanism for \textbf{LIF migration during failover}: if a node fails, its LIFs migrate to partner node ports automatically. For NAS protocols, this provides transparent failover without client reconnection in most cases.
+
+ONTAP's \textbf{FlexGroup volumes} are the primary scale-out construct: a FlexGroup is a single volume namespace that spans multiple constituent volumes distributed across all nodes in the cluster. Files are placed across constituents using a hash, allowing both namespace capacity and bandwidth to scale with the number of nodes. A FlexGroup can grow to hundreds of petabytes and serve millions of files. ONTAP's \textbf{FlexCache} feature allows a read-cache volume on one cluster to serve data originating on another cluster (or cloud-based ONTAP), reducing latency and bandwidth for geographically distributed workloads.
+
+NetApp's \textbf{ONTAP Mediator} and \textbf{SnapMirror Active Sync} (formerly SnapMirror Business Continuity) provide synchronous replication between clusters for zero-RPO workloads, with the Mediator serving as an external tiebreaker to prevent split-brain during site failures.
+
+\section{Dell PowerScale (Isilon)}
+Dell PowerScale, based on the OneFS operating system originally developed by Isilon Systems, implements scale-out NAS through an architecture that combines the filesystem, volume manager, and data protection into a single distributed layer running symmetrically across all nodes in a cluster.
+
+A PowerScale cluster consists of 3 to 252 nodes, each a self-contained server with CPU, memory, networking, and local drives. All nodes run identical OneFS software. \textbf{There is no primary node, no master controller, and no separate metadata server} --- every node is a peer, participating equally in metadata management and data serving. This is the core architectural commitment of OneFS: a single, symmetric distributed filesystem.
+
+The \textbf{OneFS distributed lock manager} coordinates access to files and directories across all nodes, ensuring coherent access when multiple nodes serve requests for the same file simultaneously. File locking uses a token-based mechanism with a global lock coordinator that can migrate in response to load.
+
+Data protection in OneFS is provided by \textbf{FEC (Forward Error Correction)} --- a form of erasure coding native to the filesystem. Rather than RAID applied to physical drives, OneFS stripes file data and parity information across nodes and drives at the file level, using a configurable protection level (N+1, N+2, N+2:1, N+3, etc.). A file protected at N+2 level can tolerate simultaneous failure of any two drives or any two nodes without data loss. This per-file protection level allows mixed protection levels within the same cluster --- critical data can have higher protection while archive data uses more economical settings.
+
+PowerScale nodes are available in several tiers: all-flash (F-series) for performance-intensive workloads, hybrid NVMe-HDD (H-series) for balanced workloads, archive-class (A-series) for cost-effective capacity, and cloud-enabled (B-series with cloud tiering). A single OneFS cluster can mix node types within the node pool hierarchy, tiering data between pools based on access patterns through \textbf{SmartPools} policy-based data movement.
+
+The cluster scales linearly in both capacity and performance: adding nodes adds storage capacity, CPU, memory, and network bandwidth simultaneously. For read-heavy workloads, bandwidth grows nearly linearly with node count. Write performance scales similarly, bounded ultimately by the protection overhead (parity computation).
+
+\section{Qumulo}
+Qumulo takes a pragmatic approach to scale-out NAS that prioritizes operational visibility and real-time analytics above all else. Its architecture, based on a shared-nothing cluster of nodes, stores all metadata on flash (SSD) regardless of the underlying media type for data, ensuring consistent metadata performance regardless of cluster load.
+
+The distinguishing feature of Qumulo's design is its \textbf{real-time metadata analytics}: the filesystem is instrumented to continuously aggregate metadata statistics --- file counts, capacity usage, throughput --- bottom-up through the directory tree, without requiring expensive background tree walks. This makes it possible to answer questions like "which directories have grown the most in the past hour?" or "what is the throughput per directory over the past day?" through a web UI or API query, in real time, at petabyte scale. For enterprises dealing with uncontrolled data sprawl, this capability is practically transformative.
+
+Qumulo's \textbf{Scalable Block Store} uses a log-structured approach, organizing data into a protected virtual address space where each 4K block is either a data block or an erasure coding hash block. The ratio of data to parity blocks adjusts dynamically as the cluster grows --- a small cluster uses replication, while a larger cluster transitions to erasure coding for greater efficiency. Erasure coding is performed natively without requiring separate configuration.
+
+Qumulo offers its software in both appliance form (on Qumulo-branded or validated third-party hardware) and as a cloud-native deployment on AWS and Azure, where it uses cloud block storage for data and can scale compute and storage independently. This cloud-native flexibility --- a single Qumulo instance that spans on-premises and cloud nodes --- is a differentiator for hybrid cloud use cases.
+
+\section{VAST Data}
+VAST Data represents perhaps the most architecturally radical departure from traditional scale-out NAS design. Founded in 2016, VAST built its platform around three converging technology trends: the falling cost of QLC NAND flash, the availability of NVMe-oF (NVMe over Fabrics) for network-attached storage, and the maturation of storage class memory (SCM/3D XPoint) as a high-endurance write buffer.
+
+VAST's \textbf{DASE (Disaggregated and Shared-Everything) architecture} challenges the assumption that scalable storage must be built from shared-nothing clusters. In VAST's model, compute elements (called \textbf{servers}) are completely stateless --- they run VAST software but hold no persistent data. All persistent data resides in \textbf{JBOF (Just a Bunch of Flash) enclosures} that are NVMe-oF accessible from any server. Any server can access any NVMe device over the fabric.
+
+This disaggregation has several important consequences. First, server failures are non-disruptive --- the server had no authoritative ownership of data; other servers simply pick up the dropped workload. Second, the system can be expanded by adding either servers (for performance) or JBOF capacity (for storage) independently. Third, all servers participate in processing every file, enabling a single large file to be read and processed by all servers simultaneously --- effectively unlimited per-file parallelism.
+
+VAST employs a \textbf{global flash translation layer (GFTL)} that manages all flash devices across all JBOFs as a single pool, applying similarity-based deduplication and compression across the entire namespace. The GFTL organizes data into large erasure-coded stripes of homogeneous data (grouped by similarity hash), dramatically improving compression ratios compared to per-device or per-file compression. This global efficiency engine allows VAST to claim that a single tier of QLC flash can be economically competitive with HDD-based systems for capacity-oriented workloads.
+
+VAST uses \textbf{storage class memory} (3D XPoint/Optane, and more recently, high-endurance flash) as a write buffer across the cluster. Writes land first in the distributed SCM buffer, which provides the high endurance needed to absorb bursty write patterns, and are then organized and flushed to the main QLC flash pool as large, efficient sequential writes. This write path is what allows VAST to use low-cost, low-endurance QLC flash for the bulk of its capacity without wearing out drives prematurely.
+
+VAST's filesystem architecture distributes metadata across all servers, with a globally consistent distributed transaction system ensuring atomicity for multi-object operations. The combination of disaggregated compute, shared flash, and global metadata makes VAST capable of sustaining extremely high concurrent client counts --- thousands of clients accessing billions of files across a single namespace --- which is why VAST has attracted significant adoption in AI/ML training data repositories and large-scale media workflows.
+
+\section{WekaIO (Weka)}
+Weka (previously WekaIO) targets the intersection of HPC parallel filesystem performance and enterprise NAS operational simplicity. Its WekaFS is a fully distributed parallel filesystem designed from scratch to operate on NVMe flash, aiming to deliver sub-millisecond latencies across a shared POSIX namespace accessible to thousands of clients simultaneously.
+
+Weka's architecture deploys its storage software inside Linux containers (using cgroups and network namespaces) on commodity server hardware, bypassing the Linux kernel's I/O stack through SPDK (Storage Performance Development Kit). SPDK's user-space NVMe driver eliminates kernel context switches on the I/O path, allowing Weka to approach NVMe device latency directly from the distributed filesystem layer. This bypass architecture is fundamental to achieving the sub-250 microsecond latencies that Weka demonstrates at scale.
+
+Data and metadata are both fully distributed across all nodes. Unlike Lustre's separation of metadata and data servers, Weka treats every node as equivalent --- each node runs both metadata and data services. Metadata is distributed using consistent hashing and protected through replication. Data files are striped across all nodes using a configurable stripe width.
+
+Weka supports all major access protocols from a unified pool: POSIX via its kernel driver or FUSE mount, NFS for compatibility, SMB for Windows clients, S3 for object access, and \textbf{GPUDirect Storage} --- a NVIDIA-developed protocol that allows GPU memory to DMA directly from storage, bypassing the CPU and system memory entirely. GPUDirect Storage support positions Weka as particularly well-suited for AI/ML training workloads where data loading from storage to GPU is often the performance-limiting factor.
+
+Weka can be deployed on-premises on customer hardware, as an SaaS offering on public cloud instances (EC2, Azure VMs, GCE), or in a hybrid configuration where on-premises nodes and cloud instances share a single unified namespace. The cloud integration supports burst-to-cloud for temporary compute scale-out while keeping data on-premises, or full cloud-native deployment for AI training workloads that need high-performance storage adjacent to GPU instances.
+
+\section{Data Placement: Hashing, Consistent Hashing, and CRUSH}
+Distributing data across nodes efficiently is a core challenge in any distributed storage system. Several algorithms have been developed, each with different trade-offs in data distribution quality, migration cost, and computational overhead.
+
+\section{Simple Hashing}
+The simplest approach is to hash the object key (filename, object name, block address) to a node index using a modular hash: node = hash(key) \% N. This distributes objects uniformly across N nodes and requires only a single computation to locate any object. The fatal weakness is that adding or removing a single node changes N, remapping approximately (N-1)/N fraction of all objects --- effectively causing a full data shuffle across the cluster. For storage systems where data migration is expensive and disruptive, modular hashing is impractical at scale.
+
+\section{Consistent Hashing}
+Consistent hashing, introduced by Karger et al. in 1997, addresses the rehashing problem by mapping both nodes and objects to positions on an abstract circular hash ring. Each node is assigned one or more positions on the ring (virtual nodes or vnodes), and each object maps to the nearest node position in the clockwise direction. When a node is added, it takes over responsibility only from its immediate successor on the ring --- approximately 1/N of all objects migrate. When a node is removed, its objects migrate to its successor. The fraction of objects that must move is minimized.
+
+Virtual nodes (multiple ring positions per physical node) smooth the distribution, preventing uneven load when nodes have different capacities or when node counts are small. Both Amazon Dynamo and Apache Cassandra adopted consistent hashing with virtual nodes as their data placement foundation.
+
+For storage systems, consistent hashing provides good distribution and minimal migration but does not natively express failure domain constraints --- there is no built-in mechanism to ensure replicas land on nodes in different racks or datacenters. Layers built on top of consistent hashing must add this logic explicitly.
+
+GlusterFS's DHT translator uses a linear variant of consistent hashing where bricks are assigned ranges on a 32-bit integer space without the circular wrapping, achieving similar distribution properties.
+
+\section{CRUSH: Constraint-Aware Hashing}
+CRUSH extends the basic idea of hashing-based placement to incorporate physical topology constraints. Rather than a ring, CRUSH uses a hierarchical tree (the CRUSH map) and a set of placement rules that specify how many replicas to place, at what level of the hierarchy to separate them (rack, row, datacenter), and which device classes to prefer. The CRUSH algorithm traverses the tree from the root, at each level making a weighted pseudo-random selection among the children, guided by a seed derived from the PG number.
+
+The result is placement that is both statistically uniform and constraint-satisfying --- replicas land on different failure domains as specified by the rule. CRUSH is deterministic: given the same CRUSH map and PG number, every node independently computes the same OSD list. No lookup is required.
+
+When the CRUSH map changes (nodes added or removed), CRUSH renames some PG-to-OSD mappings, triggering migration of only the affected data. The balancer module minimizes unnecessary movement by using weight sets that compensate for the probabilistic nature of CRUSH assignments. For very large clusters, even small changes can trigger significant movement if not controlled, which is why operational discipline around CRUSH map changes is important in production Ceph deployments.
+
+\section{Metadata Management in Distributed Systems}
+\section{The Metadata Problem}
+Filesystem metadata --- directory trees, file attributes, permissions, timestamps, extent maps --- is accessed orders of magnitude more frequently than data in most workloads. A file read involves exactly one data access but may involve multiple metadata operations: path lookup through each directory component, permission check, inode read, extent map lookup. For workloads generating millions of small files (HPC checkpoints, AI training datasets, machine learning feature stores), metadata throughput becomes the dominant constraint.
+
+In a distributed filesystem, metadata management poses a specific challenge: metadata must be consistent across all nodes (a file created on one node must immediately be visible to all other nodes), yet a centralized metadata server becomes a bottleneck and single point of failure as the cluster grows.
+
+\section{Centralized Metadata Architecture}
+Lustre's traditional architecture uses a single active MDS (Metadata Server) as the authoritative source for all namespace operations. All clients send metadata requests to the MDS, which serializes them and applies them to the MDT (Metadata Target). The advantages are simplicity --- consistency is trivially maintained since there is one writer --- and predictable behavior for sequential namespace operations.
+
+The disadvantages become apparent at scale. A single MDS can typically sustain 100,000 to 500,000 metadata operations per second depending on workload and hardware. For workloads generating small files at high rates across thousands of compute nodes, this ceiling is quickly reached. Lustre's Distributed Namespace (DNE) partially addresses this by allowing multiple MDTs, with directories assigned to specific MDTs --- but directory striping (introduced in later releases) is required to distribute a single directory's contents across multiple MDTs.
+
+\section{Distributed Metadata Architecture}
+Systems like Spectrum Scale (GPFS), BeeGFS, Ceph (with multiple active MDS), and VAST distribute metadata across multiple nodes from the ground up. Each approach has different implementation details:
+
+In \textbf{Spectrum Scale}, metadata is distributed across all nodes that hold NSDs (Network Shared Disks), with file metadata stored in inodes distributed by inode number across the storage pool. A distributed lock manager coordinates access, but no single node is the bottleneck for all metadata operations. The challenge is maintaining consistency across distributed metadata --- a directory create operation must atomically update both the directory's inode and its parent directory's inode, which may be on different nodes.
+
+In \textbf{BeeGFS}, metadata nodes each own a set of directory entries, distributed by directory inode number across all metadata daemons. Each metadata daemon maintains its own local journal, and cross-node operations are handled through a two-phase approach. The uniform distribution ensures that metadata load scales linearly with the number of metadata nodes.
+
+In \textbf{Ceph/CephFS} with multiple active MDS nodes, directory subtrees are dynamically migrated between MDS nodes in response to load. The subtree assignment map is maintained by the MDS cluster itself, with each MDS knowing which subtrees it is authoritative for. Clients discover which MDS to contact for a given path through a request that can be forwarded between MDS nodes if necessary. Dynamic subtree migration allows CephFS to adapt to shifting access patterns without manual reconfiguration.
+
+\section{Metadata Caching and Coherence}
+Regardless of whether metadata is centralized or distributed, clients aggressively cache metadata to avoid round-trips to the metadata service on every filesystem operation. Cache coherence --- ensuring that a client's cached metadata remains valid when another client modifies the same file or directory --- is implemented through a variety of mechanisms.
+
+\textbf{Lease-based systems} (NFS v4, CephFS) grant clients time-limited or operation-limited leases on specific metadata. While a client holds a valid lease, it may serve operations from cache without consulting the server. The server can revoke leases to notify clients that their cached data is stale.
+
+\textbf{Inode invalidation} (used in some clustered filesystems) broadcasts invalidation messages to all clients holding a cached copy of an inode when that inode is modified. This is simple but generates O(clients) traffic for popular files.
+
+\textbf{Token/capability systems} (Spectrum Scale, CephFS) grant clients specific capabilities (read, write, create) for specific inodes. Capabilities must be revoked before conflicting access is granted. The metadata server tracks capability grants and can request revocation from a specific client rather than broadcasting to all clients.
+
+The right coherence mechanism depends on the access pattern. For write-mostly workloads with many clients updating different files (the common HPC pattern), aggressive caching with lease-based coherence is effective. For highly shared files accessed by many clients, coherence overhead becomes significant, and applications may need to coordinate access at the application level rather than relying on filesystem coherence.
+
+
+\subsection{Progressive File Layouts (PFL)}
+
+\textbf{Progressive File Layout (PFL)} is a Lustre feature that allows a single file to have different striping configurations at different extents. Rather than fixing the stripe count and stripe size for the entire file at creation time, PFL enables the filesystem to start with a conservative layout (for example, a single stripe on one OST for small files) and progressively widen the stripe pattern as the file grows past configurable size thresholds.
+
+A typical PFL configuration might specify: a single stripe for the first 1~MB of a file (optimizing metadata overhead and small-file performance), two stripes across two OSTs for the 1--64~MB range, and striping across all available OSTs for data beyond 64~MB. This approach eliminates the perennial Lustre tuning dilemma: narrow stripes waste parallelism on large files, while wide stripes waste OST resources on small files. PFL solves this by adapting the layout to the file's actual size.
+
+PFL is configured through Lustre's composite layout API and can be set as the default layout for a directory or applied per-file. It is particularly valuable in AI/ML training workloads where a single directory may contain millions of small image files (which should use narrow stripes) alongside large checkpoint files (which benefit from wide stripes).
+
+\subsection{Hierarchical Storage Management (HSM)}
+
+\textbf{Lustre HSM} provides a framework for transparently migrating data between the high-performance Lustre filesystem and lower-cost storage tiers (typically tape libraries or object storage). HSM extends Lustre with a \textbf{coordinator} (running on the MDS) that manages data movement policies, and one or more \textbf{copytool agents} that perform the actual data transfer between Lustre and the archive backend.
+
+When a file is archived, Lustre releases the file's data blocks on the OSTs but retains the metadata (inode, directory entry, file size, permissions) on the MDS. The file remains visible in the directory listing with its original attributes, but its state changes to ``released.'' When a user or application accesses a released file, Lustre transparently triggers a \textbf{restore} operation: the copytool retrieves the data from the archive, writes it back to the OSTs, and the I/O completes once the data is available. This restore-on-access behavior is transparent to applications but introduces latency for the first access after release.
+
+HSM supports multiple archive backends through pluggable copytools. The most common backends are POSIX filesystem archives (for staging to tape via tools like HPSS or Spectrum Archive), and S3-compatible object storage for cloud tiering. Lustre HSM policies can be based on file age, access time, file size, or custom user-defined attributes, enabling automated data lifecycle management within the parallel filesystem.
+
+
+\section{Security \& Governance}
+Distributed and software-defined storage systems introduce a significantly expanded security surface compared to traditional monolithic arrays. Data traverses multiple network paths, resides on potentially many nodes, and is managed by software that must itself be secured and authenticated. A rigorous security posture for distributed storage requires addressing encryption, isolation, and authentication at each layer.
+
+\section{Encryption at Rest in Distributed Systems}
+Encrypting data at rest in a distributed filesystem is more complex than in a single-node storage system, because data is spread across many nodes and the encryption key management must be consistent across the cluster.
+
+\textbf{Ceph} supports encryption at the OSD level through the BlueStore backend, which can encrypt all data written to each OSD using dm-crypt (AES-XTS) before it reaches the disk. Keys are typically stored externally in a KMIP-compatible key management server (such as HashiCorp Vault or Thales CipherTrust), integrated through the Ceph key management service (KMS) interface. CephFS can additionally use file-level encryption (fscrypt) at the client level, separating data encryption from storage-level encryption and allowing per-user or per-directory encryption keys.
+
+\textbf{PowerScale/OneFS} supports data-at-rest encryption (DARE) through self-encrypting drives (SEDs) with OneFS managing the key hierarchy using a data authentication key (DAK). Optionally, OneFS integrates with external KMS platforms for key lifecycle management, separating key custody from data custody.
+
+\textbf{Spectrum Scale} offers native filesystem-level encryption (GPFS encryption) that encrypts individual files using AES-256. Encryption policies can be defined per fileset, allowing different encryption domains within the same cluster. Keys are managed through IBM Security Key Lifecycle Manager or Thales, with key derivation hierarchies allowing master keys to protect file encryption keys (FEKs).
+
+\textbf{BeeGFS} does not provide native encryption at rest; it relies on the underlying block device encryption (dm-crypt/LUKS) at each storage target, managed externally.
+
+\textbf{VAST Data} encrypts all data at rest by default, using AES-256-XTS with keys managed through an integrated key management system that can be connected to external KMS through KMIP. Global deduplication across the cluster occurs before encryption (deduplication is performed on plaintext to maintain effectiveness), which has policy implications in multi-tenant environments.
+
+\section{Encryption in Transit}
+In distributed storage systems, data moves between clients and storage nodes, between storage nodes for replication, and between the cluster and external systems. Each of these paths requires encryption for deployments in multi-tenant or untrusted-network environments.
+
+\textbf{Ceph} encrypts client-to-cluster traffic using msgr2 (messenger version 2 protocol) with optional CRC or encryption modes. In encryption mode, all traffic between Ceph clients (including OSD-to-OSD replication) is encrypted using AES-GCM. This is enabled per connection type in the Ceph configuration and imposes a CPU overhead on both ends. For high-throughput workloads, hardware AES acceleration (present on all modern server CPUs) is essential to limit this overhead.
+
+\textbf{PowerScale} supports SMB3 encryption for SMB-protocol traffic, NFSv4 with Kerberos for NFS traffic, and TLS for S3 API connections. Internal cluster traffic between nodes is on a dedicated private cluster interconnect network; physical segmentation of this network from external networks is an important architectural control.
+
+\textbf{Spectrum Scale} supports encryption of all inter-node communication using TLS certificates, with per-connection certificate validation. The cluster must be configured with a certificate authority and distributed certificates for each node.
+
+\section{Multi-Tenant Isolation}
+Distributed storage systems serving multiple tenants (business units, customers, or application environments) must provide isolation that prevents one tenant's data or operations from affecting another's.
+
+\textbf{Namespace isolation} is the fundamental mechanism. Ceph uses pools as the primary isolation boundary (each pool has independent CRUSH rules, access controls, and encryption policy), with individual users granted access to specific pools through the Ceph authentication system (CephX). CephX uses a shared-secret model (HMAC-SHA1) where each client entity has a set of capabilities specifying which pools and operations it may access.
+
+\textbf{ONTAP SVMs} provide multi-tenant isolation at the NAS layer --- each SVM has its own namespace, network interfaces, and authentication configuration, and an SVM administrator cannot access another SVM's data even on the same cluster. The cluster administrator can set storage quotas, QoS limits, and capacity policies per SVM.
+
+\textbf{PowerScale zones} implement multi-tenant isolation within OneFS, providing separate access zones with independent authentication providers, export configurations, and access policies. Zones share the physical cluster but are logically isolated.
+
+\textbf{Network isolation} through VLAN segmentation or physically separate network interfaces should be combined with namespace isolation for deployments where strong tenant separation is required. Relying solely on access control without network isolation leaves clusters vulnerable to protocol-level attacks that bypass access control.
+
+\section{Certificate-Based Cluster Authentication}
+Internal cluster communication --- OSD-to-OSD, OSD-to-monitor, client-to-cluster --- is authenticated using certificate or shared-key mechanisms to prevent rogue nodes from joining the cluster and exfiltrating data or injecting corrupted data.
+
+\textbf{Ceph} uses CephX, a challenge-response authentication protocol based on shared secrets (not certificates). Each daemon and client identity has a key registered with the monitor cluster. When a client connects, the monitors issue time-limited session tickets that encode the client's capabilities. While effective against outsider attacks, CephX provides less protection than certificate-based mutual TLS in environments where key compromise is a concern. Ceph can be deployed behind a TLS-terminating proxy for external access, and msgr2 encryption provides confidentiality for cluster-internal traffic.
+
+\textbf{ONTAP} uses SSL certificates for HTTPS management APIs and cluster peer authentication. iSCSI CHAP and FC-SP provide storage protocol authentication. Cluster-to-cluster peering (for SnapMirror replication) uses per-cluster certificates issued by an internal CA or trusted external CA.
+
+\textbf{PowerScale} requires joining nodes to the cluster through a secure bootstrap process and uses internal certificates for cluster daemon communication. External access is authenticated through Active Directory (for SMB/Kerberos), LDAP, or local user databases.
+
+For all distributed storage systems, hardening recommendations include: limiting cluster management interfaces to dedicated management networks, enabling audit logging for all administrative actions, regularly rotating authentication credentials, integrating with enterprise identity providers (Active Directory, LDAP) rather than local user databases, and conducting periodic access reviews to ensure cluster access follows the principle of least privilege.
+

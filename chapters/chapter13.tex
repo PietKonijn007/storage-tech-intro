@@ -1,0 +1,270 @@
+\chapter{Data Reduction --- Deduplication, Compression, Compaction}
+\label{ch:13}
+
+Data does not arrive in a storage system as a finished artifact that sits unchanged until it is discarded. It is created, classified, processed, moved between tiers, referenced by legal processes, and eventually either destroyed or retained indefinitely. Information lifecycle management (ILM) is the discipline of governing that entire arc --- from the moment a byte is written to the moment it is provably erased --- through policies that balance business value, regulatory obligation, cost efficiency, and security posture.
+
+For an enterprise architect, ILM sits at the intersection of storage engineering, records management, legal compliance, and security architecture. Getting it right means that expensive primary storage is not consumed by data that has cooled below any business value threshold, that regulated data resides in the correct jurisdiction and is protected at the correct strength, that legal obligations can be met on short notice, and that sensitive data is disposed of in a manner that gives defensible evidence of erasure. Getting it wrong is expensive, legally risky, and increasingly auditable.
+
+This chapter covers the full lifecycle model --- classification frameworks, storage tiering as a lifecycle mechanism, archival technologies, data reduction through deduplication and compression, and the legal apparatus of eDiscovery and legal hold --- before examining the security architecture that classification-driven governance enables.
+
+\section{Information Lifecycle Management: The Full Arc}
+\section{Defining the Lifecycle}
+ILM as a formal discipline emerged from records management in the 1990s and was formalized in enterprise storage products through the early 2000s. The core insight is that data has a value curve: it is most valuable --- and most actively accessed --- shortly after creation, and that value typically declines over time while regulatory and legal obligations may require retention long after active value has disappeared.
+
+The lifecycle is conventionally divided into five phases:
+
+\textbf{Creation and ingestion.} Data enters the organization through application writes, data imports, API ingestion, or sensor streams. At this phase the system should capture sufficient metadata to drive downstream classification --- origin system, data type, owner, creation timestamp, sensitivity indicators. Many organizations defer classification to a batch process after ingestion, but this creates a window of unclassified data that represents an unknown risk. Inline classification at ingest, where the ingestion pipeline applies classification tags before or immediately after the first write, is architecturally superior because it allows storage and access control policies to take effect from the first moment.
+
+\textbf{Active use.} Data in active use sits on primary storage --- all-flash arrays, high-performance object tiers, or hyperconverged infrastructure. Latency and throughput requirements dominate architecture decisions at this phase. Access patterns here are the most read/write-mixed, and the data is most frequently accessed. Primary storage real estate is the most expensive in the portfolio, which creates the economic pressure to move data off primary as quickly as its access patterns permit.
+
+\textbf{Less-active / warm.} As data ages --- or as its access pattern shifts from frequent random I/O to occasional sequential reads --- it transitions to a warm tier. In a tiered architecture this might be a capacity-dense flash tier, a hybrid (HDD-backed) tier, or a warm object storage tier (such as Amazon S3 Standard-Infrequent Access or Azure Blob Cool). The data is still online and retrievable with reasonable latency, but the per-gigabyte cost is lower.
+
+\textbf{Archive.} Data that must be retained --- for regulatory compliance, legal hold, historical analysis, or business continuity purposes --- but is rarely if ever accessed transitions to archival storage. Archive tiers tolerate high first-byte latency (minutes to hours) in exchange for very low per-gigabyte cost. Tape, deep-cold object tiers (S3 Glacier, Azure Archive, Google Coldline/Archive), and purpose-built archive appliances occupy this tier.
+
+\textbf{Disposition.} When a data object reaches the end of its retention period --- and is not subject to a legal hold or other override --- it must be disposed of in a manner consistent with its classification. Disposition ranges from routine deletion (for low-sensitivity data) to cryptographic erasure (for encrypted data at rest) to physical media destruction (for the highest sensitivity classifications). Disposition must be documented and auditable.
+
+\section{Policy-Driven ILM}
+Modern ILM is not operated manually. The scale of enterprise data makes manual lifecycle management impractical; instead, classification metadata drives policy engines that automate tier transitions, retention enforcement, and disposition. A policy engine operates on rules of the form: "data classified as class X, created more than N days ago, with access count less than M, transitions to tier Y." Disposition policies: "data classified as class X, older than N years, not subject to hold, is eligible for deletion."
+
+Most enterprise storage platforms provide native policy engines. NetApp ONTAP's FabricPool transparently moves cold data to object storage based on access temperature. Dell EMC PowerScale (Isilon) SmartPools applies tiering policies within a single namespace. Pure Storage Evergreen//One relies on the supporting infrastructure for tiering. Object storage platforms --- MinIO, StorageGRID, Dell ECS --- implement lifecycle policies natively through S3-compatible lifecycle configuration, which defines rules based on object age, prefix, or tag.
+
+Cloud object stores treat lifecycle policies as a first-class configuration object. An S3 lifecycle rule can transition objects through multiple storage classes (Standard $\rightarrow$ Standard-IA $\rightarrow$ Glacier Instant Retrieval $\rightarrow$ Glacier Deep Archive) with retention periods defined per class, and can trigger deletion at the end of the retention chain. These rules can be applied at bucket level or per prefix, and they can be gated on object tags, enabling classification-driven tiering where the tags carry the classification result from the ingestion pipeline.
+
+The key architectural principle is that classification metadata must be persistent, portable, and machine-readable. If lifecycle policy decisions depend on metadata that lives only in a CMDB or a separate catalog, then policy engines cannot act on it autonomously at scale. Object metadata (S3 object tags, user-defined metadata, extended attributes in POSIX filesystems) is the preferred carrier because it travels with the data object.
+
+\section{Data Classification Frameworks}
+\section{Sensitivity Classification}
+Sensitivity classification answers the question: what harm could result if this data were disclosed without authorization? Sensitivity tiers are typically three to five levels, with specific labels varying by industry and jurisdiction. A common enterprise framework:
+
+\textbf{Public.} Information intended for unrestricted distribution. Marketing materials, published financial results, public documentation. No access restrictions beyond those preventing unauthorized modification.
+
+\textbf{Internal.} Information for use within the organization but not intended for external disclosure. Internal policies, operational procedures, non-sensitive business communications. Standard perimeter controls are sufficient; additional encryption may not be required.
+
+\textbf{Confidential.} Sensitive business information whose unauthorized disclosure would cause material harm --- competitive damage, financial loss, or reputational harm. Customer lists, contracts, financial projections, product roadmaps. Requires encryption at rest and in transit, access controls enforcing least privilege, and audit logging.
+
+\textbf{Restricted / Highly Confidential.} Information whose unauthorized disclosure would cause severe harm, including personal data subject to GDPR or other privacy regulations, financial records subject to regulatory scrutiny, health records, and credentials. Requires the strongest available encryption, strict access controls with multi-person authorization for administrative access, and comprehensive audit trails.
+
+\textbf{Top Secret / Classified.} Applicable primarily in defense and government contexts, with formal access control frameworks (e.g., Bell-LaPadula) and physical security requirements for the storage infrastructure.
+
+Healthcare organizations layer HIPAA sensitivity categories (PHI, de-identified data) over this general framework. Financial services organizations add categories for material non-public information (MNPI) and PCI-DSS cardholder data. EU-regulated organizations must map personal data (as defined by GDPR Article 4) to at minimum the Confidential tier, and special categories of personal data (Article 9) to the Restricted tier.
+
+\section{Retention Classification}
+Retention classification answers a different question: how long must this data be kept? Retention requirements arise from multiple sources that may conflict:
+
+\textbf{Regulatory mandates} define minimum retention periods that cannot be shortened unilaterally. Examples: financial transaction records (7 years under EU accounting directives), medical records (10 years under many EU member state laws, longer for pediatric records), tax records (typically 7-10 years), audit logs for systems covered by DORA (at least 5 years for ICT incidents). These are floors, not ceilings.
+
+\textbf{Legal hold} overrides normal retention policies. When litigation is reasonably anticipated, organizations must suspend disposition for all potentially relevant data regardless of whether the normal retention period has expired. Legal holds are discussed in detail in the eDiscovery section below.
+
+\textbf{Business retention} reflects the organization's own assessment of how long data retains operational or strategic value, independent of regulatory requirements. Operational databases might retain transaction records for 2 years for analytics purposes even though regulatory requirements require only 1 year.
+
+\textbf{Privacy minimization} pulls in the opposite direction. GDPR Article 5(1)(e) --- the storage limitation principle --- requires that personal data not be retained longer than necessary for the original purpose. This creates a compliance obligation to delete data promptly when its purpose expires and no regulatory override applies. Organizations that retain personal data indefinitely as a convenience are in direct violation of this principle.
+
+The intersection of retention mandates, legal hold, and privacy minimization creates a classification dimension that is inherently multi-valued: a single record may carry a regulatory retention floor, a privacy minimization ceiling, and a legal hold override. The retention policy engine must resolve these attributes correctly, which requires that records management, legal, and privacy governance functions collaborate on the classification taxonomy.
+
+\section{Classification Implementation}
+Classification can be applied through several mechanisms, not mutually exclusive:
+
+\textbf{Manual classification} by data creators or data stewards. Appropriate for high-value, well-understood data types (board minutes, M\&A documents) where the creator is the most knowledgeable classifying agent. Does not scale to large volumes.
+
+\textbf{Rule-based classification} applies pattern matching and regular expressions to content. Effective for structured data patterns (credit card numbers, social security numbers, IBAN codes, email addresses) that can be identified syntactically. Tools like Microsoft Purview Information Protection, Varonis, Titus, and Forcepoint DLP perform rule-based classification at ingest or at rest.
+
+\textbf{Machine learning classification} trains models on labeled examples to classify content whose sensitivity is indicated by semantic rather than syntactic features --- contract language, research data, code containing API keys. ML classification requires curated training data and ongoing calibration, and it produces probabilistic rather than deterministic results. It is appropriate as a secondary control, with human review for edge cases.
+
+\textbf{Metadata inheritance} propagates classification from parent objects to children. A file stored in a folder designated as Restricted inherits that classification unless explicitly overridden. A derivative of a classified dataset inherits the source classification. This is the baseline mechanism for most enterprise DLP systems.
+
+\section{Storage Tiering as a Lifecycle Tool}
+Storage tiering is the physical implementation of the lifecycle value curve. Rather than storing all data on a single storage medium at a uniform cost, tiered architectures distribute data across media of varying performance and cost characteristics, and automate movement between tiers as the data's value curve shifts.
+
+\section{The Tier Hierarchy}
+A complete enterprise tier hierarchy, from hottest to coldest, comprises:
+
+\textbf{Tier 0 --- DRAM / Persistent Memory.} In-memory databases and real-time analytics engines that require sub-microsecond latency keep their working set in DRAM or CXL-attached memory. This is the most expensive tier and is not managed by conventional ILM systems; it is controlled by the application layer.
+
+\textbf{Tier 1 --- NVMe All-Flash.} Primary production storage for latency-sensitive workloads. Oracle databases, SQL Server transaction logs, VMware datastores, high-frequency trading systems. Sub-millisecond latency, high IOPS density. All-flash arrays from Pure Storage, NetApp AFF, Dell PowerStore, HPE Alletra occupy this tier. Per-TB cost is high, typically \$200-600/TB raw in on-premises deployments, declining with data reduction.
+
+\textbf{Tier 2 --- Capacity Flash / Hybrid.} High-capacity all-flash configured for sequential throughput rather than random IOPS latency, or hybrid arrays combining flash caching with HDD capacity. Suitable for warm databases, analytics workloads, development and test environments, recently ingested unstructured data. Per-TB cost is 30-60\% of Tier 1.
+
+\textbf{Tier 3 --- High-Capacity HDD.} Dense HDD configurations, often NLSAS or SATA, providing bulk capacity at low per-TB cost. Scale-out NAS systems, backup targets, active archiving. Latency in the single-digit millisecond range. Suitable for data accessed weekly rather than continuously.
+
+\textbf{Tier 4 --- On-Premises Object / Cold Object.} Object storage configured with high-density erasure coding for maximum utilization efficiency. Data accessed months to years into its lifecycle. On-premises: MinIO with erasure coding, StorageGRID, Dell ECS. Cloud: S3 Standard-IA, Azure Cool, Google Nearline. First-byte latency in tens of milliseconds for cloud IA tiers.
+
+\textbf{Tier 5 --- Archival Cold Storage.} Data retained for years or decades. High first-byte latency is acceptable. Cloud: S3 Glacier Instant Retrieval (milliseconds), Glacier Flexible Retrieval (minutes to hours), Glacier Deep Archive (12 hours), Azure Archive (hours), Google Archive. On-premises: tape and active archive appliances.
+
+\textbf{Tier 6 --- Tape.} LTO tape remains the most cost-effective medium for true deep archive at enterprise scale. LTO-9 provides 18 TB native per cartridge (45 TB with 2.5:1 compression), with LTO roadmaps extending to LTO-12 at 144 TB native. Tape is offline, providing air-gap protection against ransomware. Write-once media prevents in-place modification. First-byte latency is minutes (robot retrieval + rewind/seek). Total cost of ownership for large tape libraries is sub-\$5/TB managed over 5 years for the media cost alone.
+
+\section{Auto-Tiering Architecture}
+Auto-tiering systems observe access patterns --- typically by monitoring block or object access at the storage controller level --- and automatically move data between tiers. The movement is transparent to applications and hosts; they continue to access data through the same logical address (LUN, share, bucket/key), while the physical location shifts beneath them.
+
+\textbf{Block-level auto-tiering} operates at sub-LUN granularity, moving individual extents (typically 512 KB to 10 MB chunks) between storage tiers within an array. Dell EMC FAST VP (Full Automated Storage Tiering for Virtual Pools) pioneered this approach, evaluating extent temperature nightly and rebalancing across SSD, SAS, and NL-SAS tiers. Pure Storage does not require sub-LUN tiering within the array because the all-flash backend eliminates the hot/cold gradient within primary storage; tiering to an object tier is handled by upper-layer orchestration.
+
+\textbf{Object-level tiering} is the dominant model for unstructured data. NetApp FabricPool operates at the ONTAP volume level, moving cold data blocks from primary flash to an S3-compatible object store (cloud or on-premises) based on an access temperature threshold (the default cooling period is 31 days). From the NAS or SAN client's perspective, the namespace is unchanged; FabricPool retrieves data from the object tier on demand when a cold block is accessed. Dell FAST for Isilon (PowerScale) tiers between disk pools within the clustered namespace.
+
+The architectural implication of auto-tiering is that lifecycle policy operates on a data-temperature signal that is derived from actual I/O patterns rather than human-assigned metadata. This is appropriate for operational tiering decisions --- moving data to cheaper tiers based on access frequency --- but is insufficient for compliance-driven retention and disposition, which must be driven by explicit classification and retention metadata, not access temperature. A compliance record might have zero access events but must not be moved to a tier that makes it unrecoverable within the required retrieval time, and it must not be deleted based on temperature alone.
+
+\section{Archival Storage: Tape, Cold Object, and Deep Archive}
+\section{Tape Architecture}
+Linear Tape-Open (LTO) tape is the dominant format for enterprise tape storage. The LTO Consortium (HP, IBM, Quantum) publishes a generational roadmap that has delivered consistent capacity growth --- roughly doubling every two to three years --- since LTO-1 in 2000.
+
+The LTO format specifies two-generation backward compatibility: an LTO-9 drive reads LTO-8 and writes LTO-8 cartridges, and reads (but does not write) LTO-7. This has important lifecycle implications: organizations that maintain a large LTO-7 archive must migrate or retain compatible drives. The physical format is a half-inch magnetic tape in a cartridge, with the drive containing the read/write head assembly, the servo system, and the embedded encryption engine (for LTO-4 and later, hardware AES-256 encryption is standard).
+
+A tape library (robot) automates cartridge handling, with robotic arms retrieving cartridges from storage slots and loading them into available tape drives on demand. Enterprise libraries such as the IBM TS4500, Quantum Scalar i6000, and HPE StoreEver MSL scale from dozens to hundreds of thousands of slots. Throughput scales with the number of drives. The IBM TS4500 supports up to 512 drives per frame extension, with a maximum uncompressed capacity exceeding 2 exabytes per library complex.
+
+LTFS (Linear Tape File System) provides a file-system interface to LTO tape, presenting tape cartridges as file systems mountable by standard operating system tools. LTFS stores a directory/index partition in the first part of the tape, enabling file-level access without proprietary software. This simplifies long-term archival because LTFS-formatted tapes are self-describing and do not depend on proprietary catalog databases for basic access.
+
+Tape's economic profile is compelling for deep archive: media cost per TB is \$3-8, and tapes stored on shelves in a climate-controlled vault consume no power. The cost of a tape library infrastructure --- robotics, drives, a tape management software stack --- is non-trivial, but at petabyte scale the media economics dominate, and total five-year cost of ownership for tape archive is typically 80-90\% lower than disk-based archive.
+
+The operational caveat is retrieval latency. Retrieving a specific file from a tape library requires: (1) robot arm selects cartridge from slot (seconds), (2) cartridge loads into drive (30-60 seconds), (3) drive seeks to file position (which may require reading from the beginning for non-LTFS tapes). Total first-byte latency for an on-demand restore from tape is typically 2-10 minutes. This is acceptable for disaster recovery restores and regulatory record production, but not for any interactive application.
+
+\section{Cold Object Storage Tiers}
+Cloud providers have developed tiered object storage products specifically for long-term archival, trading retrieval latency and per-request cost for low per-TB storage cost.
+
+\textbf{Amazon S3 Glacier Instant Retrieval} provides millisecond retrieval time at \$0.004/GB/month (as of 2025), suited for data accessed once per quarter or less. \textbf{S3 Glacier Flexible Retrieval} (formerly S3 Glacier) offers retrieval in 1-5 minutes (Expedited), 3-5 hours (Standard), or 5-12 hours (Bulk), at \$0.0036/GB/month. \textbf{S3 Glacier Deep Archive} provides 12-hour Standard retrieval and 48-hour Bulk retrieval at \$0.00099/GB/month --- the cheapest object storage product from AWS. The trade-off is a 90-day minimum storage duration charge for Instant Retrieval, 90 days for Flexible Retrieval, and 180 days for Deep Archive; early deletion incurs a prorated charge.
+
+\textbf{Azure Blob Archive} tier (\$0.00099/GB/month) requires rehydration before objects can be read, with a standard rehydration time of approximately 15 hours. Azure offers Priority rehydration at higher cost for urgent access. The minimum storage duration is 180 days.
+
+\textbf{Google Cloud Archive} (\$0.0012/GB/month) offers the same millisecond access as Standard tier with no retrieval time penalty, but with per-operation and per-byte retrieval charges that make it cost-effective only for rarely accessed data.
+
+On-premises cold object storage --- using platforms like StorageGRID or MinIO on high-density JBOD configurations --- can achieve per-TB costs comparable to cloud glacier tiers at sufficient scale (roughly 1 PB+), while keeping data on-premises for residency or latency reasons.
+
+A critical architectural decision for long-term archival is format and encoding independence. Data archived in a proprietary format is hostage to the continued availability of that format's software. The ISO 14721 OAIS (Open Archival Information System) reference model defines the requirements for a trustworthy digital archive, including the concept of an Archival Information Package (AIP) that contains the data object, preservation metadata, and any transformation instructions needed to interpret the data in the future. Long-term digital preservation practice follows OAIS, wrapping data objects with descriptive and structural metadata in open formats (BagIt, PREMIS, METS).
+
+\section{Data Deduplication}
+\section{Principles and Mechanics}
+Deduplication identifies and eliminates redundant data by storing only one physical copy of data that appears multiple times, replacing duplicate occurrences with references to the stored copy. The fundamental operation is hashing: the deduplication engine divides incoming data into segments, computes a cryptographic hash of each segment, and compares that hash against a fingerprint store (dedup index). If a match is found, the engine stores a reference (pointer) to the existing segment instead of the redundant data. Only the unique segment is written to physical media.
+
+The deduplication ratio measures efficiency: a 3:1 ratio means the system stores 1 TB of physical data for every 3 TB of logical data presented. Deduplication ratios vary dramatically by workload:
+
+\begin{itemize}
+  \item • Virtual machine images (multiple VMs sharing a base OS): 5:1 to 20:1
+  \item Backup data (repeated fulls with incremental changes): 10:1 to 50:1
+  \item Database data (random, high-entropy): 1:1 to 1.5:1
+  \item Video content (already compressed): 1:1
+\end{itemize}
+
+The quality of the fingerprint store (hash index) directly determines the effectiveness of deduplication. The index must be queried for every segment during ingest. At petabyte scale, the index itself becomes a large data structure --- a 1 PB dedup store with 8 KB segments has approximately 134 million index entries --- and keeping this index in DRAM for fast lookup is a significant memory requirement. Dedup engines that must go to disk for index lookups experience a write amplification penalty that can reduce ingest throughput dramatically.
+
+\section{Inline vs. Post-Process Deduplication}
+\textbf{Inline deduplication} performs the hash computation and index lookup before writing data to storage. If a duplicate is found, only the pointer is written. No redundant data ever touches the storage media. This approach reduces write I/O by the dedup ratio, which extends the life of flash media and reduces capacity consumed. The trade-off is that the hash computation and index lookup add latency to the write path --- typically 100-500 microseconds for an in-memory hash index lookup, which is acceptable for HDD-backed systems but can be meaningful for NVMe-backed all-flash where baseline write latency is 100-200 microseconds.
+
+Pure Storage, NetApp, and HPE 3PAR implement inline deduplication. Pure Storage's ASLR (Adaptive Scale-out Logical Replication) maintains the dedup hash table in NVRAM-backed DRAM and achieves inline dedup with minimal write path overhead, claiming it is a significant contributor to their published performance numbers because the reduced write I/O improves controller efficiency.
+
+\textbf{Post-process deduplication} writes data to storage first (typically to a staging area), then runs the deduplication engine asynchronously. The staging write happens at full speed with no dedup overhead. The dedup scan runs as a background task, typically during off-peak hours or when the system has available processing capacity. The advantage is that the primary write path is unaffected by dedup processing time. The disadvantage is that the storage system must accommodate the full non-deduped volume until the background process runs --- requiring sufficient staging capacity --- and that the dedup savings are not realized immediately.
+
+Post-process dedup is common in backup-specific appliances (Dell EMC Data Domain, Quantum DXi, HPE StoreOnce), where the ingest stream from multiple backup agents can be very high and the value of not impacting ingest throughput outweighs the transient storage overhead.
+
+\section{Fixed-Block vs. Variable-Block (Content-Defined) Chunking}
+\textbf{Fixed-block chunking} divides data into segments of fixed size --- typically 4 KB, 8 KB, or 32 KB --- aligned on block boundaries. The advantage is simplicity: hash computation is straightforward, and the index structure is uniform. The disadvantage is that a byte inserted at the beginning of a file shifts all subsequent block boundaries, causing every block to contain different content and producing a different hash, destroying the deduplication opportunity. This is the classic "data shift" problem.
+
+\textbf{Variable-block (content-defined) chunking} uses a rolling hash (Rabin fingerprint is the canonical algorithm) over a sliding window of bytes to identify chunk boundaries based on the content itself rather than fixed offsets. When the rolling hash of the window matches a predefined pattern, a boundary is declared. This produces variable-size chunks --- typically in the range of 4-16 KB for a 8 KB average target --- whose boundaries are defined by the data content. The critical property is that an insertion at position X in a file changes only the chunks that contain position X; chunks before and after the insertion are unaffected and produce the same hashes as before. This makes content-defined chunking robust against insertions, deletions, and formatting changes that would destroy fixed-block dedup effectiveness.
+
+Variable-block chunking is computationally more expensive than fixed-block because the rolling hash must be computed byte-by-byte, but modern SIMD instructions make this tractable. For backup workloads --- where files may be slightly modified between backup cycles --- variable-block chunking is essential for achieving meaningful dedup ratios across incremental backups.
+
+\section{Deduplication Scope}
+The scope of deduplication --- what data participates in the shared fingerprint pool --- significantly affects dedup ratios. Narrow-scope deduplication (per-volume or per-LUN) misses duplicates that exist across volumes. Wide-scope deduplication (global across the entire storage system) achieves the highest ratio because it eliminates duplicates regardless of which volume or host produced them. NetApp's A-SIS deduplication operates per-volume on ONTAP; cross-volume dedup requires FlexClone and is managed differently. Pure Storage maintains a global dedup pool across the entire array, which is a key architectural differentiator --- a given 8 KB block hash exists only once in the physical media regardless of how many volumes reference it.
+
+The security implication of global deduplication is that data from different tenants or security domains may share physical storage blocks. If tenant A deletes their copy of a deduplicated block, the block persists because tenant B still references it. This means that deletion within a deduplication domain does not guarantee physical data removal. This is addressed through cryptographic erasure (discussed in the Security Considerations section) --- by encrypting data with keys bound to data classification or tenant identity before deduplication, the physical block becomes unreadable when the key is destroyed, even if the block remains physically present.
+
+\section{Compression}
+\section{Compression Algorithms and Trade-offs}
+Compression reduces the physical storage required by encoding data more efficiently than its original representation. While deduplication eliminates redundancy across segments, compression eliminates redundancy within segments. The two techniques are complementary: dedup operates on the hash of raw segments to find exact duplicates, while compression reduces the size of each unique segment. In practice, dedup is applied first (to avoid compressing duplicate data multiple times), and then compression is applied to the deduplicated output.
+
+The dominant compression algorithms in storage systems are characterized along three axes: compression ratio, compression speed, and decompression speed.
+
+\textbf{LZ4} is the fastest lossless compression algorithm in common use, operating at speeds of 400-700 MB/s compression and 1-2 GB/s decompression per core on modern x86 hardware. Compression ratios are modest --- typically 1.5:1 to 2.5:1 for typical text and binary data --- but the speed makes it viable for the hot write path. LZ4 is used by default in many storage systems where compression latency must be minimized: ZFS offers LZ4 as its default compression algorithm, Ceph supports LZ4 for BlueStore compression, and many all-flash arrays use LZ4-class algorithms inline. The algorithm's decompression speed is particularly important for read-heavy workloads: compressed data that decompresses faster than it can be read from flash can actually reduce read latency on compressed all-flash systems, because the I/O subsystem transfers fewer bytes.
+
+\textbf{Zstandard (zstd)} is a more recent algorithm from Facebook/Meta that offers substantially better compression ratios than LZ4 --- typically 2.5:1 to 4:1 for text and structured data --- at compression speeds of 200-400 MB/s, with decompression speeds of 1-2 GB/s. The compression ratio is tunable via compression level (1-22), with level 1 providing fast compression similar to LZ4 and level 19+ approaching LZMA ratios at the cost of compression speed. Zstd is increasingly used as the default in systems where compression ratio matters: Btrfs added zstd support in kernel 4.14, SquashFS supports zstd, and Facebook uses zstd extensively for data center workloads. For warm and archival object tiers, zstd offers a strong balance between ratio and CPU cost.
+
+\textbf{Gzip (deflate)} is the legacy standard, widely used for file compression and HTTP content encoding. Its compression ratio is similar to zstd level 3-6 for typical data, but its compression speed (typically 50-150 MB/s) is substantially lower than both LZ4 and zstd. Gzip is not typically used in storage system write paths because of its compression overhead, but it remains pervasive as a storage format for files and data products, and storage systems must handle gzip-compressed objects efficiently.
+
+\textbf{LZMA (xz)} achieves the highest compression ratios (4:1 to 8:1 for compressible data) but at very low compression speeds (10-30 MB/s), making it appropriate only for off-line archival compression where compression time is not a constraint. Long-term archival use cases --- compressing cold backups before writing to tape --- can benefit from LZMA's higher ratios at the cost of compression processing time.
+
+\textbf{Specialized codecs.} Some storage systems implement workload-specific compression. NTFS compression and ReFS use a variant of LZ. Oracle ZFS Storage Appliance (ZFSSA) and ZFS on Linux support gzip levels 1-9 as well as LZ4 as per-dataset compression choices. NetApp ONTAP implements an inline compression algorithm tuned for the 4 KB block I/O patterns common in virtualized environments. Pure Storage implements pattern matching (zeroing, all-ones) as a degenerate form of compression before applying the main compression algorithm.
+
+\section{Compression in Storage System Architectures}
+The placement of compression in the write path --- inline or post-process, and at what layer --- has significant architectural implications.
+
+Inline compression at the storage controller level is transparent to hosts and applications. All data is compressed before being written to the storage media. This reduces write amplification on flash (fewer host-logical writes translate to even fewer physical flash writes), extends flash endurance, and increases effective capacity. The CPU cost is absorbed by the storage controller. This is the model used by all major all-flash array vendors.
+
+Compression can also be applied at the host level. The ZFS filesystem on a NAS host compresses data at the dataset level before writing blocks to the underlying pool. This means the network I/O between a NAS client and the server carries uncompressed data, but the data on disk is compressed. If compression were done at the array controller below ZFS, ZFS blocks would arrive at the controller already byte-for-byte as ZFS produced them, which is efficient. The key is avoiding double-compression --- applying a second compression pass to already-compressed data (images, video, encrypted data) wastes CPU without improving ratios.
+
+\textbf{Compressibility awareness} is an important optimization. Modern storage systems detect incompressible data --- already-compressed files, encrypted data, high-entropy binary data --- and skip the compression step rather than wasting CPU on it. ONTAP's inline compression has a compressibility threshold; blocks that compress below a minimum ratio are stored uncompressed. Pure Storage's dedup/compression engine similarly detects and bypasses incompressible patterns.
+
+\section{eDiscovery and Legal Hold}
+\section{The eDiscovery Process and Federal Rules}
+Electronic discovery (eDiscovery) is the process by which electronically stored information (ESI) is identified, preserved, collected, reviewed, and produced in response to litigation, regulatory investigation, or administrative proceeding. The Federal Rules of Civil Procedure (FRCP), and equivalent rules in EU member state procedural law, create obligations that directly translate into storage architecture requirements.
+
+The FRCP amendments of 2006 and 2015 established electronically stored information as a distinct category of discoverable material, created safe harbors for good-faith data loss from routine records management operations (the "routine operation of an electronic information system" defense), and introduced proportionality principles limiting overly broad discovery demands. The practical implication is that organizations with documented, consistently enforced retention and disposition policies can defend against discovery demands more effectively than those with ad hoc data retention.
+
+The EDRM (Electronic Discovery Reference Model) defines the eDiscovery workflow:
+
+\begin{itemize}
+  \item 1. \textbf{Information Governance} --- proactive policies for data retention and records management.
+2. \textbf{Identification} --- determining what data may be relevant to the matter.
+3. \textbf{Preservation} --- placing legal holds to suspend normal disposition of relevant data.
+4. \textbf{Collection} --- gathering the preserved data for processing.
+5. \textbf{Processing} --- reducing the data volume through deduplication, filtering, format conversion.
+6. \textbf{Review} --- attorney review of processed data for responsiveness and privilege.
+7. \textbf{Production} --- delivering responsive, non-privileged documents to requesting party.
+8. \textbf{Presentation} --- use of evidence in proceedings.
+\end{itemize}
+
+From a storage architect's perspective, stages 1-4 are the most directly relevant. An enterprise must be able to: identify where potentially relevant data lives (which requires a functioning data catalog or classification system), place and enforce holds within a timeframe measured in hours to days, and collect data without altering it (maintaining forensic integrity --- chain of custody, hash verification).
+
+\section{Legal Hold Architecture}
+A legal hold is an instruction to suspend the normal disposition of data that may be relevant to pending or reasonably anticipated litigation. The hold overrides all retention policies and prevents deletion, modification, or tiering that would render data unrecoverable.
+
+Legal hold systems --- either purpose-built (Exterro, Kcura Relativity, OpenText Axcelerate, ZL Unified Archive) or modules within larger information governance platforms (Microsoft Purview eDiscovery, IBM StoredIQ) --- work by maintaining a hold index that maps custodians, data sources, and time ranges to active matters. When a hold is placed, the system must: (a) notify relevant data custodians, (b) identify all data sources that may contain responsive ESI, and (c) configure storage systems to prevent deletion of covered data.
+
+On-premises storage systems support legal holds through several mechanisms:
+
+\textbf{WORM (Write Once Read Many) storage} prevents modification or deletion of objects that have been committed to WORM state. S3 Object Lock (and its equivalents on NetApp StorageGRID, Dell ECS) supports Governance and Compliance modes. Compliance mode is the stronger protection --- not even a storage administrator with root access can delete a WORM-locked object before its retention period expires. NetApp SnapLock Compliance implements the same model at the ONTAP layer. When data is placed on legal hold, it is either written to WORM storage or the existing storage system is configured to prevent deletion of the specific objects.
+
+\textbf{Snapshot retention} can serve as a hold mechanism: placing holds on snapshot schedules that would normally expire snapshots. This is less reliable than WORM because snapshots are volume-level rather than object-level, and holding a snapshot to preserve a subset of relevant data may retain very large volumes of unrelated data.
+
+\textbf{Custodial holds} in cloud environments use platform-native hold mechanisms. Microsoft 365 Compliance Center places in-place holds on Exchange Online mailboxes, SharePoint sites, and OneDrive accounts. Google Vault provides equivalent functionality for Google Workspace. These platform holds are applied at the application layer and prevent deletion without altering the data model of the underlying object storage.
+
+\section{Collection and Forensic Integrity}
+When collecting data for production, maintaining forensic integrity requires that the collection process does not alter access timestamps, modification timestamps, or content. This eliminates simply copying files using standard OS tools, which update access timestamps. Forensically sound collection uses tools that: (a) mount source volumes read-only or use snapshot copies, (b) compute and record hash values of collected items before and after collection, and (c) document the chain of custody.
+
+Collections from live systems should use application-consistent collection methods --- quiescing the application (or using an application-aware snapshot) before collecting database files, so that the collected data represents a consistent application state. This is particularly important for mail systems, document management systems, and databases where inconsistent states at the file level do not represent valid application states.
+
+Large-scale collections --- multi-terabyte productions --- impose significant storage capacity and I/O demands. Collection staging areas must be sized appropriately, and collection processes should be scheduled or throttled to avoid impacting production I/O. A 10 TB collection at 500 MB/s takes roughly 5.5 hours; during this time the source storage system carries additional read I/O load.
+
+\section{Security \& Governance}
+The intersection of data lifecycle management and security is particularly rich because classification is simultaneously the foundation of access control policy, encryption policy, and secure disposition.
+
+\section{Classification-Driven Access Control}
+A classification-aware access control model ensures that the security controls applied to data are commensurate with its sensitivity, and that controls are applied automatically and consistently rather than relying on manual configuration for each data object.
+
+The architecture has three components. First, a classification engine that assigns and maintains classification tags on all data objects --- as discussed in the classification section above. Second, a policy enforcement point that reads classification tags and enforces access decisions accordingly. In a Kubernetes environment this is a storage-aware admission controller or CSI driver; in an S3 environment it is IAM policies with tag-based conditions; in a Windows file server environment it is Dynamic Access Control (DAC) with classification properties. Third, an audit logging layer that records every access decision, including denials, to support forensic investigation and compliance reporting.
+
+The access control model should follow the principle that higher-classification data requires stronger authentication (multi-factor, certificate-based, or hardware token) and narrower authorization (specific roles, not broad group memberships). Restricted data should require explicit, individually authorized access requests rather than group membership. The principle of least privilege is non-negotiable: no identity should have access to data beyond what their current task requires.
+
+\section{Encryption Policies by Data Class}
+A classification-aligned encryption policy defines different encryption requirements for each sensitivity tier:
+
+\textbf{Public data} may be stored without encryption or with opportunistic encryption. The marginal benefit of encrypting public data is low, but many organizations apply encryption uniformly to simplify policy.
+
+\textbf{Internal data} should be encrypted at rest using AES-256, with key management through the organization's enterprise KMS. Encryption in transit (TLS 1.2 minimum, TLS 1.3 preferred) is mandatory.
+
+\textbf{Confidential data} requires AES-256 encryption at rest with key management separate from the storage system --- i.e., not using storage-system-managed keys that the storage vendor has access to. Customer-Managed Keys (CMK) in cloud environments, or an external KMS (Thales CipherTrust, Fortanix DSM) for on-premises, are required. Key access is audited. Key rotation is performed on a defined schedule (annually at minimum).
+
+\textbf{Restricted / Highly Confidential data} requires the strongest available encryption, separate key management with HSM-backed key storage, dual-person integrity for key operations, and cryptographic separation between tenants. Special categories of personal data under GDPR require explicit data protection impact assessment (DPIA) before processing. Encryption keys must be stored in a jurisdiction consistent with data residency requirements.
+
+Encryption at rest must be accompanied by encryption in transit to avoid exposing plaintext on storage networks. For SAN traffic: IPsec for iSCSI, FC-SP for Fibre Channel, or NVMe/TLS for NVMe-oF. For NAS traffic: NFS with Kerberos + NFSv4.1 encryption, or SMB 3.x with encryption enabled. For object storage: TLS on the S3 API, with additional encryption of the object payload for highest-sensitivity data.
+
+\section{Secure Deletion and Cryptographic Erasure}
+Secure deletion is the process of rendering data unrecoverable after disposition. The appropriate method depends on the storage medium and the classification of the data.
+
+\textbf{Cryptographic erasure} (also called crypto shredding) is the preferred method for all modern storage systems. The principle: if data is encrypted with a unique key, and that key is securely destroyed, the encrypted data is computationally indistinguishable from random noise and is effectively erased. This approach works regardless of the underlying storage medium --- flash, HDD, tape, cloud object storage --- and does not require the time-consuming physical overwrite passes that traditional secure erase methods require.
+
+To support cryptographic erasure, data must be encrypted with keys that are managed at the granularity of the erasure requirement. If you need to erase a single customer's data across a multi-tenant system, that customer's data must be encrypted with keys unique to that customer (or at most shared with a small data set that will be erased together). A single shared encryption key for all data provides protection against an attacker who lacks the key, but does not enable selective erasure. Key-per-tenant or key-per-classification-domain is the required architecture.
+
+In cloud environments, cryptographic erasure is the only reliable method for data deletion, because cloud providers do not guarantee that physical deletion of an object means the underlying bits are immediately overwritten. Even when an object is deleted from S3, Azure Blob, or Google Cloud Storage, the physical media on which it resided continues to exist under cloud provider control. With cryptographic erasure --- where the customer deletes their CMK --- the data is rendered unreadable regardless of whether the cloud provider has physically overwritten the storage cells.
+
+\textbf{Physical overwrite} remains relevant for HDDs not covered by encryption, for media being decommissioned from service. NIST SP 800-88 (Guidelines for Media Sanitization) provides the definitive guidance: for HDDs, a single overwrite pass is sufficient for modern drives (earlier guidance recommending seven passes was based on older magnetic recording density assumptions that no longer apply). For SSDs and NVMe devices, physical overwrite is unreliable because the flash translation layer may not write to the same physical cells as the logical addresses being overwritten. Cryptographic erasure is preferred for flash; if that is unavailable, the device should be physically destroyed (degauss is not effective for flash, as it does not modify charge states in NAND cells).
+
+\textbf{Self-Encrypting Drives (SEDs)} support an ATA/NVMe secure erase command (PSID revert) that regenerates the internal encryption key, cryptographically erasing all user data in seconds. This is the fastest method for drive-level erasure at decommission time. The OPAL 2.0 security subsystem class defines the management interface for SEDs and is supported by enterprise HDD and SSD vendors including Seagate, WD, Samsung, and Micron.
+
+\textbf{Media certification and destruction documentation} must accompany secure deletion for data classified at Restricted or above. An audit trail --- documenting which physical media was erased, the method used, when it occurred, and who performed or witnessed the erasure --- is a compliance requirement under many frameworks (ISO 27001 Annex A.8.10, NIST SP 800-53 MP-6) and is expected by regulators conducting GDPR investigations.
+

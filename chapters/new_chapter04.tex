@@ -1,0 +1,301 @@
+\chapter{Mounting, Namespaces, and Access Semantics}
+\label{ch:4}
+
+Mounting is the mechanism by which the operating system makes a filesystem accessible at a specific location in the directory tree. Without mounting, a formatted block device is simply an opaque sequence of sectors --- usable by the kernel's filesystem driver but invisible to user-space processes. The act of mounting bridges the gap between a storage device and the hierarchical namespace that applications use to open, read, and write files. This chapter examines mounting in depth --- from the kernel-level \texttt{mount()} system call through user-space tooling and systemd integration --- and then extends the discussion to advanced namespace constructs such as bind mounts, overlay filesystems, and mount propagation. Because mounting determines not only where data appears but also how it can be accessed, the chapter concludes with a thorough treatment of the POSIX permissions model, Access Control Lists (ACLs), and extended attributes, which together define the access semantics of every file and directory on a Linux system.
+
+\section{The mount() System Call}
+
+At the kernel level, the \texttt{mount()} system call is the fundamental interface for attaching a filesystem to the directory tree. Its signature is:
+
+\begin{verbatim}
+int mount(const char *source, const char *target,
+          const char *filesystemtype, unsigned long mountflags,
+          const void *data);
+\end{verbatim}
+
+The \texttt{source} argument identifies the block device or pseudo-device containing the filesystem (e.g., \texttt{/dev/sda1} for a physical partition, or \texttt{none} for pseudo-filesystems such as \texttt{proc} and \texttt{sysfs}). The \texttt{target} argument specifies the directory --- the \textbf{mount point} --- where the filesystem will become visible. The \texttt{filesystemtype} string names the kernel filesystem driver to use (e.g., \texttt{ext4}, \texttt{xfs}, \texttt{btrfs}, \texttt{tmpfs}). The \texttt{mountflags} parameter is a bitmask of standard mount options such as \texttt{MS\_RDONLY}, \texttt{MS\_NOSUID}, \texttt{MS\_NOEXEC}, and \texttt{MS\_NODEV}. Finally, the \texttt{data} argument carries filesystem-specific options as a comma-separated string that the kernel filesystem driver parses directly.
+
+When the kernel processes a \texttt{mount()} call, it creates a \textbf{mount structure} (\texttt{struct mount} in the kernel source) that records the relationship between the source device, the filesystem superblock, the mount point dentry, and the mount flags. This structure is inserted into the kernel's \textbf{mount tree}, a hierarchical data structure rooted at the root filesystem's mount. The mount tree tracks every active mount and its parent-child relationships, enabling the kernel to resolve paths across mount boundaries transparently. When a process performs a path lookup (e.g., \texttt{open("/mnt/data/file.txt", ...)}), the VFS layer walks the directory tree and, upon encountering a mount point, crosses into the mounted filesystem by following the mount structure's pointer to the new filesystem's root dentry.
+
+The mount tree is per-namespace: each \textbf{mount namespace} (discussed later in this chapter) maintains its own independent mount tree. This is the mechanism that allows containers and sandboxed processes to have entirely different views of the filesystem hierarchy while sharing the same kernel.
+
+Starting with Linux 5.2, the kernel also exposes a newer mount API based on \texttt{fsopen()}, \texttt{fsconfig()}, \texttt{fsmount()}, and \texttt{move\_mount()} system calls. This API provides finer-grained control over the mount process, allowing configuration of filesystem parameters before the filesystem is actually mounted. The older \texttt{mount()} call remains fully supported and is still the interface used by the standard \texttt{mount} command-line utility.
+
+\section{The /etc/fstab File}
+
+The file \texttt{/etc/fstab} (\textbf{filesystem table}) is the traditional configuration file that declares which filesystems should be mounted at boot time and with what options. Each non-comment line in \texttt{fstab} contains six whitespace-separated fields:
+
+\begin{itemize}
+  \item \textbf{Device specifier}: Identifies the block device or remote resource. This can be a device path (\texttt{/dev/sda1}), a UUID (\texttt{UUID=a1b2c3d4-...}), a filesystem label (\texttt{LABEL=data}), or a network path (\texttt{server:/export} for NFS). Using UUIDs is strongly preferred over device paths because device names can change across reboots when disks are added or removed.
+  \item \textbf{Mount point}: The absolute path where the filesystem will be mounted (e.g., \texttt{/home}, \texttt{/var/log}).
+  \item \textbf{Filesystem type}: The filesystem type string passed to \texttt{mount()} (e.g., \texttt{ext4}, \texttt{xfs}, \texttt{nfs}, \texttt{swap}).
+  \item \textbf{Mount options}: A comma-separated list of options. \texttt{defaults} expands to \texttt{rw,suid,dev,exec,auto,nouser,async}. Additional options can be appended (e.g., \texttt{defaults,noatime,discard}).
+  \item \textbf{Dump frequency}: An integer used by the \texttt{dump} backup utility. A value of 0 means the filesystem is not dumped; 1 means it is included. This field is largely historical and is set to 0 on most modern systems.
+  \item \textbf{fsck pass number}: Determines the order in which \texttt{fsck} checks filesystems at boot. The root filesystem should be 1; other filesystems should be 2 (checked after root) or 0 (not checked). On systems using journaling filesystems exclusively, this field is often set to 0 because journal replay handles consistency.
+\end{itemize}
+
+On systems running \textbf{systemd}, the \texttt{fstab} file is not processed directly by a traditional init script. Instead, the \texttt{systemd-fstab-generator} reads \texttt{/etc/fstab} at boot time and dynamically generates \texttt{.mount} unit files in a temporary directory. These generated units are then processed by systemd's normal unit dependency machinery, which ensures that mount ordering, dependencies, and parallelism are handled correctly. This means that \texttt{fstab} entries benefit from systemd's dependency resolution --- for example, a mount that depends on a network device will wait for \texttt{network-online.target} if the \texttt{\_netdev} option is specified.
+
+\section{systemd .mount and .automount Units}
+
+While \texttt{/etc/fstab} remains the most common way to declare mounts, systemd also supports native \textbf{.mount unit files} that provide finer control over mount behavior. A \texttt{.mount} unit file is named after the mount point path, with slashes replaced by dashes and the leading slash removed. For example, a mount at \texttt{/mnt/data} corresponds to a unit file named \texttt{mnt-data.mount}. The unit file's \texttt{[Mount]} section specifies the \texttt{What=} (device), \texttt{Where=} (mount point), \texttt{Type=} (filesystem type), and \texttt{Options=} (mount options) directives.
+
+The advantage of native \texttt{.mount} units over \texttt{fstab} entries is access to the full systemd dependency model. A \texttt{.mount} unit can declare \texttt{After=}, \texttt{Requires=}, \texttt{WantedBy=}, and other dependency directives that precisely control when the mount is established relative to other system services. This is particularly useful for mounts that depend on network connectivity, encryption unlocking (via \texttt{systemd-cryptsetup}), or iSCSI session establishment.
+
+\textbf{.automount units} provide on-demand mounting. An \texttt{.automount} unit monitors a mount point directory and triggers the corresponding \texttt{.mount} unit only when a process attempts to access the mount point. This is analogous to the traditional \texttt{autofs} mechanism but integrated into systemd's event loop. The \texttt{.automount} unit supports a \texttt{TimeoutIdleSec=} directive that automatically unmounts the filesystem after a period of inactivity, freeing resources for infrequently accessed mounts such as removable media or network shares.
+
+The relationship between \texttt{fstab} and systemd units is intentionally seamless: the \texttt{systemd-fstab-generator} produces \texttt{.mount} units that are functionally identical to hand-written ones. Adding the \texttt{x-systemd.automount} option to an \texttt{fstab} entry causes the generator to also produce a corresponding \texttt{.automount} unit. Other \texttt{x-systemd.*} options in \texttt{fstab} control systemd-specific behavior, including \texttt{x-systemd.requires=}, \texttt{x-systemd.device-timeout=}, and \texttt{x-systemd.mount-timeout=}.
+
+\section{Mount Options in Depth}
+
+Mount options govern how the kernel filesystem driver handles I/O, metadata updates, and error conditions. Selecting appropriate mount options is critical for performance, data integrity, and device longevity.
+
+\subsection{Timestamp Options: noatime and relatime}
+
+Every file access on a traditional Unix filesystem updates the \textbf{atime} (access time) metadata field, generating a write I/O for every read operation. The \texttt{noatime} mount option disables atime updates entirely, eliminating this write amplification. On workloads that perform many small reads --- such as mail servers scanning Maildirs or web servers serving static content --- \texttt{noatime} can measurably reduce I/O and improve SSD endurance.
+
+The \texttt{relatime} option is a compromise: it updates atime only when the current atime is older than the file's mtime (modification time) or ctime (change time), or when more than 24 hours have elapsed since the last atime update. This preserves atime information for programs that depend on it (such as \texttt{tmpwatch} or \texttt{mutt}) while drastically reducing unnecessary writes. Since Linux 2.6.30, \texttt{relatime} is the kernel default when no atime option is specified.
+
+\subsection{SSD and Discard Options}
+
+The \texttt{discard} mount option enables continuous TRIM: whenever the filesystem deletes a file or frees blocks, it immediately issues ATA TRIM or SCSI UNMAP commands to the underlying device, informing the SSD's flash translation layer that those blocks are no longer in use. This allows the SSD controller to perform garbage collection proactively. However, continuous TRIM can introduce latency spikes on some controllers because the TRIM command may be processed synchronously. An alternative approach is periodic TRIM via \texttt{fstrim}, typically scheduled as a weekly systemd timer or cron job, which batches all TRIM operations into a single pass.
+
+\subsection{Write Barrier and Journal Options}
+
+\textbf{Write barriers} ensure that the filesystem's on-disk structures remain consistent by forcing the storage device to flush its volatile write cache at critical points in the journaling sequence. The \texttt{barrier=1} option (the default on ext4) enables this behavior; \texttt{barrier=0} disables it. Disabling barriers improves write performance but risks data loss or filesystem corruption if power is lost while data remains in the device's write cache. Barriers should only be disabled when the storage subsystem has battery-backed or capacitor-backed write cache (as is common with enterprise RAID controllers and NVMe devices with power-loss protection).
+
+The \texttt{data=} option on ext4 controls how the journal handles file data (as opposed to metadata):
+
+\begin{itemize}
+  \item \texttt{data=ordered} (default): File data is flushed to its final location before the associated metadata is committed to the journal. This ensures that a crash cannot leave metadata pointing to stale or uninitialized data blocks, preventing data exposure from previously deleted files.
+  \item \texttt{data=journal}: Both file data and metadata are written to the journal before being committed to their final locations. This provides the strongest consistency guarantee but reduces write throughput because all data passes through the journal, effectively doubling write volume.
+  \item \texttt{data=writeback}: Only metadata is journaled; file data can be written to its final location at any time relative to the metadata commit. This offers the best performance but can expose stale data after a crash if metadata has been committed but the corresponding data blocks have not yet been written.
+\end{itemize}
+
+\subsection{Commit Interval}
+
+The \texttt{commit=N} option controls the interval, in seconds, between periodic journal commits. The default is 5 seconds for ext4. Increasing this value (e.g., \texttt{commit=30}) batches more updates into each journal transaction, reducing write frequency at the cost of a larger window of data loss during an unclean shutdown. Decreasing the interval provides more frequent persistence guarantees but increases write amplification.
+
+\subsection{Error Handling}
+
+The \texttt{errors=} option determines how the filesystem responds to I/O errors or detected corruption:
+
+\begin{itemize}
+  \item \texttt{errors=remount-ro}: The filesystem is remounted read-only, preventing further data modification and preserving the current state for forensic analysis or repair. This is the recommended setting for production data volumes.
+  \item \texttt{errors=continue}: The filesystem continues operating despite errors, which risks compounding corruption.
+  \item \texttt{errors=panic}: The kernel panics immediately, which is useful for clustered environments where a fencing mechanism must take over quickly.
+\end{itemize}
+
+\section{Bind Mounts}
+
+A \textbf{bind mount} makes a directory (or a single file) appear at an additional location in the filesystem hierarchy. Unlike a symbolic link, which is resolved at the path-lookup level and is visible to applications as a link, a bind mount operates at the VFS mount layer and is indistinguishable from a normal mount to all processes. The kernel implements a bind mount by creating a new mount structure that shares the same superblock and dentry tree as the original mount.
+
+Bind mounts are created with \texttt{mount --bind /source /target} or with the \texttt{MS\_BIND} flag in the \texttt{mount()} system call. A read-only bind mount can be created by combining the bind with \texttt{MS\_RDONLY} in a subsequent remount operation (the initial bind mount inherits the permissions of the source).
+
+The most important use case for bind mounts is \textbf{sharing host directories into containers}. Container runtimes such as Docker, Podman, and containerd use bind mounts to project specific host directories into a container's filesystem namespace. For example, mounting a host directory \texttt{/data/app-config} into a container at \texttt{/etc/app-config} allows the containerized application to read configuration files managed on the host, without copying them into the container image. Kubernetes \texttt{hostPath} volumes are implemented as bind mounts from the node's filesystem into the pod's mount namespace.
+
+Bind mounts are also used to satisfy chroot environments, build systems that need access to specific host paths, and systemd's \texttt{ProtectHome=} and \texttt{ProtectSystem=} sandboxing directives, which use read-only bind mounts to mask sensitive directories from service processes.
+
+\section{Overlay Mounts (overlayfs)}
+
+\textbf{Overlayfs} is a union filesystem that merges multiple directory trees into a single coherent view. It is the filesystem driver that underpins container image layering in Docker, Podman, and virtually all OCI-compliant container runtimes. Overlayfs operates on three (or more) directory parameters:
+
+\begin{itemize}
+  \item \textbf{lowerdir}: One or more read-only directory layers, specified as a colon-separated list. These represent the immutable base layers --- in container terms, the layers of the container image.
+  \item \textbf{upperdir}: A single read-write directory where all modifications are stored. When a file in a lower layer is modified, it is first copied to the upper directory (\textbf{copy-up}), and subsequent reads and writes operate on the upper copy.
+  \item \textbf{workdir}: A working directory on the same filesystem as \texttt{upperdir}, used by the kernel for atomic operations during copy-up. This directory must be empty and on the same filesystem as the upper directory.
+\end{itemize}
+
+The merged view presents the union of all layers, with upper-layer files taking precedence over lower-layer files of the same path. When a file is deleted from the merged view, overlayfs creates a \textbf{whiteout file} in the upper directory --- a character device with major and minor number 0/0 --- that masks the corresponding lower-layer file. For directory deletions, an \textbf{opaque directory} marker (a trusted.overlay.opaque extended attribute set to ``y'') is placed on the upper-layer directory, hiding all lower-layer contents.
+
+Container runtimes exploit overlayfs to achieve efficient image sharing: multiple running containers based on the same image share identical lower layers (consuming storage only once), while each container gets its own upper directory for runtime modifications. When a container is deleted, only its thin upper layer is removed; the shared image layers remain intact.
+
+\section{Mount Propagation}
+
+\textbf{Mount propagation} controls whether mount and unmount events in one mount are visible in other mounts that share the same source. This mechanism is critical for container runtimes, which must carefully control which host mounts are visible inside containers and whether mounts created inside a container leak back to the host.
+
+Linux defines four propagation types:
+
+\begin{itemize}
+  \item \textbf{Shared} (\texttt{MS\_SHARED}): Mount and unmount events propagate bidirectionally between peer mounts. If a new filesystem is mounted under a shared mount in one namespace, it appears in all namespaces that share that mount.
+  \item \textbf{Private} (\texttt{MS\_PRIVATE}): No propagation. Mount events are entirely local to the mount's namespace. This is the most restrictive setting and is the default for mounts created within a new mount namespace.
+  \item \textbf{Slave} (\texttt{MS\_SLAVE}): Propagation is unidirectional --- events propagate from the master mount to the slave, but not in the reverse direction. This allows a container to receive host mount updates (e.g., new NFS mounts) without being able to modify the host's mount tree.
+  \item \textbf{Unbindable} (\texttt{MS\_UNBINDABLE}): The mount cannot be bind-mounted. This prevents recursive bind mount loops and is used in specialized scenarios where a mount tree must not be duplicated.
+\end{itemize}
+
+Container runtimes typically configure the root mount of a container's namespace as either \texttt{private} or \texttt{slave}. Docker, for example, sets the container's root mount propagation to \texttt{rprivate} (recursively private) by default, ensuring that mounts created inside the container do not leak to the host. Kubernetes allows pod specifications to override propagation to \texttt{Bidirectional} for CSI drivers that need to create mounts visible to the host (e.g., FUSE-based storage drivers).
+
+\section{Linux Mount Namespaces}
+
+A \textbf{mount namespace} is a Linux kernel namespace that provides a process with its own isolated view of the filesystem mount tree. Processes in different mount namespaces can see entirely different sets of mounted filesystems, even though they share the same underlying kernel. Mount namespaces are the foundational mechanism for container filesystem isolation.
+
+A new mount namespace is created with the \texttt{unshare(CLONE\_NEWNS)} system call or the \texttt{clone()} system call with the \texttt{CLONE\_NEWNS} flag. The command-line utilities \texttt{unshare} and \texttt{nsenter} provide user-space access to these operations. For example, \texttt{unshare --mount /bin/bash} creates a new shell with its own mount namespace, where mounts and unmounts do not affect the parent namespace.
+
+When a new mount namespace is created, it starts as a copy of the parent namespace's mount tree. From that point, the two namespaces diverge independently (subject to propagation settings). The combination of mount namespaces and bind mounts is what allows container runtimes to construct an entirely custom filesystem view: the runtime creates a new mount namespace, then uses bind mounts and overlayfs mounts to assemble the container's root filesystem, device nodes, and any volume mounts requested by the user.
+
+The \texttt{nsenter} command allows a process to enter an existing namespace. System administrators use \texttt{nsenter --mount --target <PID>} to enter a container's mount namespace for debugging purposes, gaining the same filesystem view as the containerized process. Kubernetes' \texttt{kubectl exec} ultimately uses this mechanism to execute commands inside a pod's namespaces.
+
+Mount namespaces interact with other Linux namespaces --- PID, network, user, UTS, and cgroup namespaces --- to form the complete isolation envelope of a container. However, mount namespaces are the oldest namespace type (introduced in Linux 2.4.19) and remain the most fundamental for storage isolation. A process may share its network namespace with a peer container (as in Kubernetes pod networking) while maintaining a completely separate mount namespace, ensuring that filesystem access remains isolated even when network connectivity is shared.
+
+The \texttt{/proc/<pid>/mountinfo} file exposes the mount tree of any process (subject to permission checks), providing a detailed view that includes mount IDs, parent mount IDs, device major:minor numbers, root paths within the mounted filesystem, mount points, mount options, and propagation information. This file is the primary data source for tools like \texttt{findmnt} and is invaluable for debugging complex mount configurations in containerized environments.
+
+\section{autofs: On-Demand Mounting}
+
+\textbf{autofs} is a kernel-assisted automounting facility that mounts filesystems on demand when a process accesses a trigger directory, and optionally unmounts them after a configurable idle timeout. This is particularly useful for environments with many NFS exports, where mounting all exports at boot time would be impractical.
+
+The autofs system consists of a kernel module (\texttt{autofs4}) and a user-space daemon (\texttt{automountd} or \texttt{automount}). The kernel module installs a virtual filesystem at each \textbf{automount point}. When a process attempts to access a path under the automount point, the kernel traps the access, notifies the daemon, and blocks the process until the daemon has performed the actual mount. Once the mount is in place, the blocked process's path lookup resumes transparently.
+
+Automount behavior is controlled by \textbf{automount maps}, which can be stored in local files, NIS, LDAP, or other directory services. The master map (\texttt{/etc/auto.master} or \texttt{auto.master} in the naming service) defines automount points and associates each with a map file. Individual map entries specify the mount options and source for each subdirectory. For example, an NFS automount map entry might read:
+
+\begin{verbatim}
+data    -rw,soft,intr    nfsserver:/export/data
+\end{verbatim}
+
+This configures the automounter to mount \texttt{nfsserver:/export/data} at \texttt{<automount-point>/data} when the \texttt{data} subdirectory is accessed, using the specified NFS mount options.
+
+Autofs supports both direct maps (where each entry specifies an absolute mount point) and indirect maps (where entries are relative to the automount point directory). Wildcard entries using the \texttt{*} key mount any subdirectory name as a separate mount from the server, enabling patterns like \texttt{*  -rw  nfsserver:/export/\&} where \texttt{\&} is replaced by the requested directory name.
+
+The idle timeout (configured via the \texttt{--timeout} option to the \texttt{automount} daemon, typically defaulting to 300 seconds) controls how long an automounted filesystem remains mounted after the last access. When the timeout expires and no processes hold open files on the mount, the daemon unmounts the filesystem, freeing kernel mount structures and network connections. In environments with thousands of NFS exports --- common in HPC and academic computing clusters --- autofs is essential for keeping the number of simultaneous mounts manageable.
+
+\section{Kubernetes CSI and the Mount Chain}
+
+In Kubernetes, the path from a \textbf{PersistentVolumeClaim (PVC)} to a mounted filesystem inside a pod traverses several abstraction layers, each ultimately resolving to a Linux mount operation.
+
+When a pod referencing a PVC is scheduled to a node, the kubelet's volume manager orchestrates the attachment and mounting process. For CSI-based storage, the sequence proceeds as follows. First, the \textbf{CSI Controller} plugin (running as a pod on the cluster) calls the \texttt{ControllerPublishVolume} RPC to attach the storage volume to the target node --- for example, attaching an AWS EBS volume to an EC2 instance or mapping a SAN LUN to a host. Second, the kubelet invokes the \textbf{CSI Node} plugin (running on the target node) via the \texttt{NodeStageVolume} RPC, which formats the device if necessary and mounts it to a node-global staging directory (typically under \texttt{/var/lib/kubelet/plugins/}). Third, the kubelet calls \texttt{NodePublishVolume}, which performs a bind mount from the staging directory into the pod's volume directory (under \texttt{/var/lib/kubelet/pods/<pod-uid>/volumes/}).
+
+Finally, the container runtime creates the pod's mount namespace and uses a bind mount to project the volume directory into the container's filesystem at the path specified by the pod's \texttt{volumeMounts} configuration. The result is a chain of mounts: the original block device is mounted at the staging path, bind-mounted into the pod's volume directory, and bind-mounted again into the container's mount namespace. Each layer in this chain is a standard Linux mount operation, demonstrating that even the most abstracted cloud-native storage ultimately rests on the kernel mount infrastructure described earlier in this chapter.
+
+\section{The POSIX Permissions Model}
+
+The \textbf{POSIX permissions model} is the foundational access control mechanism for files and directories on Unix-like systems. Every file and directory has three associated identifiers: a \textbf{user ID (UID)} representing the owner, a \textbf{group ID (GID)} representing the owning group, and a \textbf{mode} bitmask encoding the permissions.
+
+The mode consists of three sets of three permission bits, conventionally written in the order owner-group-other. Each set contains:
+
+\begin{itemize}
+  \item \textbf{Read (r, bit 4)}: For files, permits reading the file's contents. For directories, permits listing the directory's entries.
+  \item \textbf{Write (w, bit 2)}: For files, permits modifying the file's contents. For directories, permits creating, deleting, and renaming entries within the directory.
+  \item \textbf{Execute (x, bit 1)}: For files, permits executing the file as a program. For directories, permits accessing (traversing into) the directory and its contents.
+\end{itemize}
+
+When a process opens a file, the kernel checks the process's effective UID and GIDs against the file's ownership and mode. If the effective UID matches the file's UID, the owner permission bits apply. Otherwise, if any of the process's GIDs (primary or supplementary) match the file's GID, the group permission bits apply. Otherwise, the other permission bits apply. The root user (UID 0) bypasses most permission checks, subject to capability restrictions.
+
+\subsection{Special Permission Bits}
+
+Beyond the nine standard permission bits, three additional bits modify access behavior:
+
+The \textbf{setuid bit} (mode 4000) on an executable file causes the process to run with the effective UID of the file's owner rather than the UID of the invoking user. The canonical example is \texttt{/usr/bin/passwd}, which runs as root to modify \texttt{/etc/shadow} even when invoked by an unprivileged user.
+
+The \textbf{setgid bit} (mode 2000) on an executable file causes the process to run with the effective GID of the file's owning group. When set on a directory, the setgid bit causes new files and subdirectories created within to inherit the directory's GID rather than the creating process's primary GID. This is essential for shared project directories where all files must belong to a common group.
+
+The \textbf{sticky bit} (mode 1000) on a directory restricts file deletion: only the file's owner, the directory's owner, or root can delete or rename files within the directory. The classic example is \texttt{/tmp}, where the sticky bit prevents users from deleting each other's temporary files.
+
+\section{Access Control Lists (ACLs)}
+
+The standard POSIX permission model provides only three granularity levels --- owner, group, and other --- which is insufficient for complex access requirements involving multiple users and groups. \textbf{POSIX ACLs} extend this model by allowing per-user and per-group permission entries on individual files and directories.
+
+ACLs are managed with the \texttt{setfacl} and \texttt{getfacl} commands. An ACL consists of a set of entries, each specifying a tag type (user, group, mask, or other), an optional qualifier (a specific UID or GID), and a permission set (read, write, execute). For example:
+
+\begin{verbatim}
+setfacl -m u:alice:rw- /data/project/report.txt
+setfacl -m g:engineering:r-- /data/project/report.txt
+\end{verbatim}
+
+The \textbf{mask entry} in an ACL defines the maximum permissions that any named user or named group entry can grant. The effective permissions for a named user or group entry are the intersection of the entry's permissions and the mask. The mask is automatically recalculated when ACL entries are added or modified, unless explicitly set with \texttt{setfacl -m m::rwx}.
+
+\textbf{Default ACLs} are set on directories and define the ACL that newly created files and subdirectories within that directory will inherit. This provides a mechanism for ACL inheritance that the base POSIX model lacks. Setting a default ACL ensures that all future files in a directory receive consistent access permissions without requiring manual intervention:
+
+\begin{verbatim}
+setfacl -d -m u:alice:rwx /data/project/
+setfacl -d -m g:engineering:rx /data/project/
+\end{verbatim}
+
+\subsection{NFSv4 ACLs vs.\ POSIX ACLs}
+
+\textbf{NFSv4 ACLs} differ substantially from POSIX ACLs. NFSv4 ACLs are modeled after Windows NTFS ACLs and support a richer set of permissions including read-attributes, write-attributes, read-named-attrs, write-named-attrs, delete-child, read-ACL, write-ACL, write-owner, and synchronize. NFSv4 ACLs also support explicit deny entries, ordered evaluation (first-match semantics), and inheritance flags (file-inherit, directory-inherit, inherit-only, no-propagate-inherit) that provide fine-grained control over how permissions propagate to child objects.
+
+POSIX ACLs use a simpler allow-only model with maximum-mask semantics. When a Linux NFS client mounts an NFSv4 export, the kernel must translate between the two ACL models, which can result in permission loss or unexpected behavior. Administrators managing mixed environments should test ACL behavior carefully and consider using NFSv4 ACLs natively where the underlying filesystem supports them (e.g., ZFS, which implements NFSv4 ACLs natively).
+
+\section{Extended Attributes (xattrs)}
+
+\textbf{Extended attributes} are name-value pairs associated with files and directories, stored alongside the inode metadata. They provide a general-purpose mechanism for attaching arbitrary metadata to filesystem objects without modifying the file's contents. Extended attributes are organized into four namespaces:
+
+\begin{itemize}
+  \item \textbf{user}: Accessible to any process with read/write permissions on the file. Used by applications to store custom metadata (e.g., MIME types, checksums, application-specific tags). Set and retrieved with \texttt{setfattr} and \texttt{getfattr}.
+  \item \textbf{security}: Used by kernel security modules. The most prominent example is \texttt{security.selinux}, which stores the SELinux security context label for each file. Other security xattrs include \texttt{security.capability} (file capabilities) and \texttt{security.ima} (Integrity Measurement Architecture hashes).
+  \item \textbf{system}: Used by the kernel for filesystem features. \texttt{system.posix\_acl\_access} and \texttt{system.posix\_acl\_default} store POSIX ACL data. The overlayfs whiteout marker \texttt{trusted.overlay.opaque} is another example.
+  \item \textbf{trusted}: Accessible only to processes with \texttt{CAP\_SYS\_ADMIN}. Used for privileged metadata that should not be readable by unprivileged users, such as overlayfs internal metadata and certain filesystem-internal bookkeeping data.
+\end{itemize}
+
+Extended attributes are subject to filesystem-specific size limits. On ext4, the total size of all extended attributes on a single inode is limited to one filesystem block (typically 4 KB), though large xattr values can overflow into a dedicated external xattr block. XFS stores extended attributes in the inode's inline data area when they fit, spilling to leaf and B-tree structures for larger attribute sets. Backup and archive tools must be explicitly configured to preserve extended attributes --- \texttt{tar} requires the \texttt{--xattrs} flag, and \texttt{rsync} requires \texttt{--xattrs} or \texttt{-X}.
+
+\begin{securitybox}
+
+\subsection*{Security-Critical Mount Options}
+
+Three mount options form the baseline for mount hardening on production Linux systems:
+
+\textbf{nosuid}: Prevents the setuid and setgid bits from taking effect on executables within the mounted filesystem. Without this option, a compromised user could place a setuid-root binary on a removable or network-mounted filesystem and escalate privileges. All user-writable mounts (e.g., \texttt{/tmp}, \texttt{/home}, removable media, NFS exports) should be mounted with \texttt{nosuid}.
+
+\textbf{noexec}: Prevents execution of any binary on the mounted filesystem. This is a defense-in-depth control that limits an attacker's ability to run downloaded or uploaded malicious executables. It should be applied to \texttt{/tmp}, \texttt{/var/tmp}, \texttt{/dev/shm}, and any other location where untrusted data may be written. Note that \texttt{noexec} does not prevent interpreted scripts from running if the interpreter is on a different mount (e.g., \texttt{/usr/bin/python /tmp/malicious.py} will succeed even with \texttt{noexec} on \texttt{/tmp}).
+
+\textbf{nodev}: Prevents the creation of device special files on the mounted filesystem. Without this option, an attacker could create a block or character device node on a user-writable filesystem and use it to access raw devices. All non-root mounts should include \texttt{nodev}.
+
+\subsection*{SELinux Context Labeling on Mounts}
+
+SELinux-aware systems can apply security context labels to mounted filesystems using mount options:
+
+\begin{itemize}
+  \item \texttt{context=<label>}: Overrides the security context of all files on the mount with the specified label. This is used for filesystems that do not natively support xattrs (e.g., FAT, NFS in some configurations).
+  \item \texttt{fscontext=<label>}: Sets the security context for the filesystem superblock object, controlling which processes can mount and manage the filesystem.
+  \item \texttt{defcontext=<label>}: Sets the default context for files that do not have an explicit \texttt{security.selinux} xattr. This is useful for filesystems that support xattrs but have unlabeled files.
+\end{itemize}
+
+Correct SELinux labeling on mounts is essential for mandatory access control enforcement. Container runtimes typically apply labels such as \texttt{container\_file\_t} to bind-mounted volumes using the \texttt{:Z} (private label) or \texttt{:z} (shared label) suffix in Docker and Podman volume specifications.
+
+\subsection*{AppArmor Mount Mediation}
+
+AppArmor profiles can restrict a process's ability to perform mount operations through mount mediation rules. A profile can specify allowed mount sources, mount points, filesystem types, and mount options. For example, a profile might allow a process to mount only \texttt{tmpfs} at \texttt{/run/app} with \texttt{noexec} and \texttt{nosuid}, blocking any attempt to mount a real block device or to mount without security-hardening options. This prevents a compromised service from mounting arbitrary filesystems to escalate privileges or exfiltrate data. Mount mediation is particularly important for container profiles, where the confined process must not be able to escape its mount namespace by mounting the host's block devices.
+
+\subsection*{Mount Namespace Isolation and Misconfiguration Risks}
+
+Mount namespace isolation is one of the primary security controls for containerized workloads, but misconfigured mount propagation can undermine it entirely. If a container's root mount is set to \texttt{shared} propagation instead of \texttt{private}, mounts created inside the container become visible on the host --- and vice versa. An attacker who gains code execution inside such a container could mount a FUSE filesystem or bind mount sensitive host paths, effectively escaping the container's intended isolation boundary.
+
+Similarly, granting a container \texttt{Bidirectional} mount propagation (as Kubernetes allows for CSI drivers) should be restricted to highly trusted workloads, because it enables the container to modify the host's mount tree. Auditing mount propagation settings is a critical part of container security reviews.
+
+\subsection*{Process Isolation with hidepid}
+
+Mounting \texttt{/proc} with the \texttt{hidepid=2} option restricts process visibility: each user can only see their own processes in \texttt{/proc}. Without this option, any user can enumerate all running processes, their command-line arguments (which may contain passwords or tokens), environment variables, and file descriptors. The mount is configured as:
+
+\begin{verbatim}
+proc  /proc  proc  defaults,hidepid=2,gid=<monitoring-group>  0  0
+\end{verbatim}
+
+The \texttt{gid=} option specifies a group whose members are exempt from the hiding, allowing monitoring tools and administrators to retain full process visibility.
+
+\subsection*{CIS Benchmark Requirements for Mount Hardening}
+
+The Center for Internet Security (CIS) benchmarks for Linux distributions mandate specific mount configurations as part of system hardening:
+
+\begin{itemize}
+  \item \texttt{/tmp} must be a separate mount (preferably \texttt{tmpfs}) with \texttt{nodev}, \texttt{nosuid}, and \texttt{noexec} options.
+  \item \texttt{/var}, \texttt{/var/tmp}, and \texttt{/var/log} must each be separate mounts to prevent a log flood or temporary file accumulation from filling the root filesystem.
+  \item \texttt{/var/log/audit} should be a separate mount to protect audit logs from being overwritten by other log data.
+  \item \texttt{/home} must be a separate mount with \texttt{nodev} (and optionally \texttt{nosuid}).
+  \item \texttt{/dev/shm} must be mounted with \texttt{nodev}, \texttt{nosuid}, and \texttt{noexec}.
+\end{itemize}
+
+These requirements exist to enforce filesystem-level isolation: separate mounts with restrictive options contain the blast radius of disk-filling attacks, prevent privilege escalation through device files or setuid binaries, and ensure that critical logging infrastructure survives capacity exhaustion on other partitions.
+
+\subsection*{Documenting Mount Configurations for Compliance}
+
+Compliance frameworks including PCI DSS, HIPAA, SOC 2, and FedRAMP require documented evidence that storage is configured according to policy. Mount configurations should be documented as part of the system's security baseline, including the rationale for each mount option. The \texttt{findmnt} command produces a structured view of the current mount tree suitable for audit evidence. Organizations should maintain \texttt{fstab} files in version control and include mount configuration review in change management procedures.
+
+\subsection*{Drift Detection}
+
+Configuration drift --- where a system's actual mount configuration diverges from its documented baseline --- is a common audit finding. Two tools are widely used for detecting drift:
+
+\textbf{AIDE} (Advanced Intrusion Detection Environment) maintains a database of file and filesystem metadata, including mount options and extended attributes. Periodic AIDE scans compare the current system state against the baseline database and report any changes. AIDE should be configured to monitor \texttt{/etc/fstab}, systemd mount unit files, and the output of \texttt{findmnt}.
+
+\textbf{Lynis} is an open-source security auditing tool that checks mount configurations against CIS benchmarks and other hardening standards. Lynis scans \texttt{/proc/mounts} and \texttt{fstab} for missing security options (e.g., \texttt{noexec} not set on \texttt{/tmp}) and reports findings with remediation guidance. Running Lynis as part of a regular audit cycle provides continuous assurance that mount hardening remains in place.
+
+\end{securitybox}

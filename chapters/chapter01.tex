@@ -1,0 +1,523 @@
+\part{STORAGE FUNDAMENTALS}
+
+\chapter{Block Devices and the Linux Storage Stack}
+\label{ch:1}
+
+\section{How Linux Sees Storage: Block Devices}
+\label{sec:block-devices}
+%% ---------------------------------------------------------------------------
+
+Linux classifies hardware devices into two fundamental categories. \textbf{Character devices} deliver data as a stream of bytes with no inherent structure --- serial ports, terminals, and random number generators are canonical examples. \textbf{Block devices}, by contrast, expose storage as an array of fixed-size blocks (historically 512 bytes, now commonly 4,096 bytes) that can be read or written at arbitrary offsets. Hard disk drives, solid-state drives, NVMe namespaces, device-mapper virtual devices, and loopback devices are all block devices. The distinction matters because the kernel applies block-layer optimizations --- I/O merging, scheduling, caching --- only to block devices.
+
+\subsection{Device Naming Conventions}
+
+Every block device appears in the \texttt{/dev} directory as a special file. The naming convention depends on the transport subsystem that owns the device. Traditional SCSI and SATA devices appear as \texttt{/dev/sdX}, where \texttt{X} is a letter assigned in discovery order: \texttt{sda}, \texttt{sdb}, \texttt{sdc}, and so on. Partitions append a numeric suffix: \texttt{/dev/sda1}, \texttt{/dev/sda2}. This naming scheme dates back to the original SCSI disk driver (\texttt{sd}) and is now used for SATA drives attached through the \texttt{libata} subsystem as well, since SATA drives are managed through the SCSI midlayer.
+
+NVMe devices follow a different convention that reflects NVMe's namespace addressing model. An NVMe controller appears as \texttt{/dev/nvmeX} (for example, \texttt{/dev/nvme0}), while a namespace on that controller appears as \texttt{/dev/nvmeXnY} (for example, \texttt{/dev/nvme0n1}). Partitions on an NVMe namespace are \texttt{/dev/nvmeXnYpZ} (for example, \texttt{/dev/nvme0n1p1}). The separation of controller and namespace in the naming scheme is deliberate: a single NVMe controller can expose multiple namespaces, each functioning as an independent block device with its own capacity, format, and access controls.
+
+\subsection{Major and Minor Numbers}
+
+Internally, the kernel identifies every device node by a pair of integers: the \textbf{major number} and the \textbf{minor number}. The major number selects the device driver responsible for the device. For SCSI disks, the major number is 8; for NVMe namespaces, it is 259; for device-mapper devices, it is 253. The minor number distinguishes individual devices and partitions managed by that driver. You can inspect these numbers with \texttt{ls -l /dev/sda} or by reading \texttt{/proc/devices}. When a process opens \texttt{/dev/sda1}, the kernel uses the major number to locate the correct driver, then passes the minor number so the driver can identify which specific device and partition is being addressed.
+
+The practical importance of major and minor numbers surfaces in container environments and device cgroup controllers, where access control policies reference devices by their major:minor pair rather than by name. This is the only stable kernel-level identifier for a device --- path names can change across reboots, but the major:minor assignment for a given driver class is deterministic.
+
+%% ---------------------------------------------------------------------------
+\section{The Device Mapper Subsystem}
+\label{sec:device-mapper}
+%% ---------------------------------------------------------------------------
+
+The \textbf{device mapper} (DM) is a kernel framework that creates virtual block devices by mapping ranges of logical sectors to ranges on one or more underlying physical block devices. Device-mapper devices appear as \texttt{/dev/dm-N} and are typically given human-readable names through \texttt{/dev/mapper/} symlinks managed by userspace tools such as \texttt{dmsetup}, LVM2, and \texttt{cryptsetup}. The device mapper is the foundation for logical volume management, software encryption, thin provisioning, caching, and multipath I/O in Linux.
+
+\subsection{dm-linear and dm-striped}
+
+The simplest device-mapper target is \textbf{dm-linear}, which maps a contiguous range of sectors on the virtual device to a contiguous range on a single underlying device. LVM2 uses dm-linear extensively: a logical volume that spans a single physical extent is implemented as a dm-linear mapping. Multiple dm-linear mappings can be concatenated to build a logical volume from non-contiguous extents on the same or different physical volumes.
+
+\textbf{dm-striped} distributes I/O across multiple underlying devices in a round-robin fashion, analogous to RAID-0 striping. Each stripe unit (configurable in sectors) is directed to the next device in sequence. dm-striped improves throughput for sequential workloads by parallelizing I/O across devices, but offers no redundancy. LVM2 uses dm-striped when you create a striped logical volume.
+
+\subsection{dm-crypt}
+
+\textbf{dm-crypt} provides transparent block-level encryption. Every sector written through a dm-crypt device is encrypted before being passed to the underlying device; every sector read is decrypted before being returned to the caller. dm-crypt supports a wide range of ciphers, with AES-XTS being the standard choice for disk encryption. The \texttt{cryptsetup} utility and the LUKS (Linux Unified Key Setup) on-disk format manage keys, key slots, and metadata for dm-crypt volumes.
+
+Performance considerations for dm-crypt are significant. Encryption and decryption consume CPU cycles for every I/O operation. Modern processors with AES-NI hardware acceleration achieve throughput exceeding 3 GB/s per core, making the overhead acceptable for most workloads. However, on systems without hardware acceleration or under heavy I/O, dm-crypt can become a bottleneck. The kernel's \texttt{crypto} workqueue distributes encryption work across multiple CPUs, and recent kernels support inline encryption offload to storage controllers that implement hardware-accelerated encryption engines.
+
+\subsection{dm-cache and dm-thin}
+
+\textbf{dm-cache} implements a block-level caching layer that uses a fast device (typically an SSD) as a cache in front of a slower device (typically an HDD). dm-cache supports write-back, write-through, and passthrough caching policies. The cache maps blocks in units called cache blocks (configurable size, commonly 64 KB to 1 MB), and the policy engine decides which blocks to promote into or demote from the cache. The \texttt{smq} (stochastic multi-queue) policy is the default and performs well across a broad range of workloads.
+
+\textbf{dm-thin} provides thin provisioning and snapshot capabilities. A thin pool consists of a data device and a metadata device. Thin volumes allocated from the pool consume physical space only as blocks are actually written --- allowing significant overcommitment of storage capacity. dm-thin also supports efficient copy-on-write snapshots: creating a snapshot is instantaneous regardless of volume size, because it shares all existing blocks with the origin and only allocates new blocks when either the origin or the snapshot is modified. Container storage drivers such as \texttt{devicemapper} in Docker historically used dm-thin for image and container layer management.
+
+%% ---------------------------------------------------------------------------
+\section{udev Rules and Persistent Device Naming}
+\label{sec:udev}
+%% ---------------------------------------------------------------------------
+
+The device names assigned by the kernel (\texttt{/dev/sda}, \texttt{/dev/sdb}) are not stable across reboots. The order in which the kernel discovers devices depends on driver initialization timing, PCI bus enumeration order, and hardware detection latency. A drive that was \texttt{/dev/sda} on one boot might appear as \texttt{/dev/sdb} on the next if an additional controller is added or if discovery timing changes.
+
+\textbf{udev}, the Linux userspace device manager, solves this problem by creating persistent symlinks in the \texttt{/dev/disk/} directory hierarchy. These symlinks point to the current kernel device name but are themselves stable across reboots because they are derived from immutable hardware or filesystem properties:
+
+\begin{itemize}
+  \item \texttt{/dev/disk/by-id/} --- symlinks based on the device's hardware serial number and bus type (for example, \texttt{wwn-0x5000...} or \texttt{nvme-eui.365...}). These are globally unique and stable as long as the physical device does not change.
+  \item \texttt{/dev/disk/by-path/} --- symlinks based on the physical interconnect path (PCI slot, port number). These identify a specific slot or port, not a specific device; swapping a drive into the same slot produces the same by-path name.
+  \item \texttt{/dev/disk/by-uuid/} --- symlinks based on the filesystem UUID stamped into the filesystem superblock. Unique per filesystem instance; a reformatted partition gets a new UUID.
+  \item \texttt{/dev/disk/by-label/} --- symlinks based on the filesystem label, if one has been set. Not guaranteed unique --- two filesystems can share the same label if an administrator makes a mistake.
+\end{itemize}
+
+Production systems should always reference block devices by persistent names in \texttt{/etc/fstab}, LVM configuration, and storage automation scripts. The \texttt{by-id} and \texttt{by-uuid} paths are the most reliable choices. Custom udev rules can be written to assign additional symlinks, set device permissions, or trigger scripts when devices appear or disappear. Rules are placed in \texttt{/etc/udev/rules.d/} and processed in lexicographic order by filename.
+
+%% ---------------------------------------------------------------------------
+\section{The Full I/O Path: From Userspace to Hardware}
+\label{sec:io-path}
+%% ---------------------------------------------------------------------------
+
+Understanding the complete I/O path is essential for diagnosing latency, identifying bottlenecks, and tuning storage performance. A \texttt{read()} system call on a file triggers the following sequence of kernel subsystems, each adding a thin layer of processing.
+
+\subsection{Userspace to VFS}
+
+An application calls \texttt{read(fd, buf, count)}. The C library translates this into the \texttt{read} system call, which enters the kernel through the system call table. The kernel's \textbf{Virtual File System (VFS)} layer receives the call first. VFS is an abstraction layer that presents a uniform file-operation interface to userspace regardless of the underlying filesystem type. VFS resolves the file descriptor to an inode and a dentry (directory entry cache), determines the filesystem type, and dispatches the operation to the filesystem-specific \texttt{read} implementation through a function pointer table (\texttt{struct file\_operations}).
+
+\subsection{Filesystem Layer}
+
+The filesystem --- ext4, XFS, Btrfs, or another --- translates the file-level read (offset and length within a file) into one or more block-level reads (logical block addresses on the underlying block device). The filesystem consults its on-disk metadata (extent trees in ext4, B+ trees in XFS) to determine which physical blocks on the device correspond to the requested file region. If the data is already present in the \textbf{page cache} (the kernel's in-memory cache of file data backed by physical pages), the filesystem returns the cached data immediately without issuing any block I/O. Cache hits are the fast path --- no device interaction occurs.
+
+For a cache miss, the filesystem constructs one or more \textbf{bio} structures (block I/O descriptors) describing the required reads and submits them to the block layer. Each bio specifies the target block device, the starting sector, the length, and a list of memory pages where the data should be placed.
+
+\subsection{Block Layer}
+
+The \textbf{block layer} receives bio structures from filesystems (and from other kernel subsystems such as the swap subsystem or direct I/O paths). The block layer's responsibilities include merging adjacent I/O requests, scheduling them for optimal device throughput, and managing the submission queues that feed into device drivers. The block layer is discussed in detail in the following section.
+
+\subsection{Device Driver}
+
+After the block layer has merged and scheduled requests, it dispatches them to the appropriate \textbf{device driver}. For SCSI-attached devices, the SCSI midlayer translates the generic block request into a SCSI Command Descriptor Block (CDB) and passes it to the Host Bus Adapter (HBA) driver. For NVMe devices, the NVMe driver constructs an NVMe submission queue entry and writes it to the device's submission queue in host memory, then rings the doorbell register to notify the controller. The device driver is the last software component in the path; beyond it lies hardware.
+
+\subsection{Hardware Execution}
+
+The storage controller (HBA, NVMe controller, or SATA controller) receives the command, accesses the storage media, retrieves or writes the data, and signals completion. For SCSI and SATA, completion is signaled via an interrupt or interrupt coalescing mechanism. For NVMe, the controller writes a completion queue entry to host memory and raises an MSI-X interrupt. The interrupt handler in the device driver processes the completion, marks the request as done, and wakes up any waiting processes. The data flows back up through the block layer and VFS to the application's buffer.
+
+%% ---------------------------------------------------------------------------
+\section{Block Layer Internals}
+\label{sec:block-layer}
+%% ---------------------------------------------------------------------------
+
+The Linux block layer is the traffic controller for all block I/O in the system. It sits between the filesystem (or other I/O originators) and device drivers, and its design has a profound impact on storage performance, fairness, and latency.
+
+\subsection{The bio Structure}
+
+The \textbf{bio} (block I/O) structure is the fundamental unit of I/O in the Linux block layer. Defined in \texttt{<linux/bio.h>}, a bio describes a single contiguous I/O operation: a set of physically contiguous sectors on a block device, along with the in-memory pages that serve as source (for writes) or destination (for reads). A bio contains a pointer to the target block device (\texttt{bi\_bdev}), the starting sector (\texttt{bi\_iter.bi\_sector}), the operation type (read, write, discard, flush), and a vector of bio\_vec entries, each pointing to a page, an offset within that page, and a length. A single bio can describe an I/O spanning multiple pages through its bio\_vec array, supporting scatter-gather semantics.
+
+When a filesystem needs to read or write file data that maps to non-contiguous disk blocks, it creates multiple bio structures --- one per contiguous extent on disk. These bios are submitted independently to the block layer.
+
+\subsection{Request Queues and the Request Structure}
+
+The block layer does not pass bio structures directly to device drivers. Instead, it aggregates bios into \textbf{request} structures. A request (\texttt{struct request}) represents a single command that will be sent to the device. The block layer merges bios that target adjacent sectors into the same request, reducing the number of commands the device must process and improving throughput through larger transfer sizes.
+
+The merging logic checks whether a newly submitted bio is adjacent to an existing request in the queue --- either at the front (front merge) or back (back merge). Back merges are the most common case for sequential workloads. The merged request accumulates the bio\_vec entries from all constituent bios, building a scatter-gather list that the device driver can translate directly into a DMA scatter-gather table for the hardware.
+
+\subsection{I/O Plug/Unplug Batching}
+
+To give the merging logic a window of bios to work with, the kernel uses a \textbf{plugging} mechanism. When a process begins submitting I/O (for example, the \texttt{readahead} path), the block layer ``plugs'' the queue, buffering submitted bios without dispatching them to the driver. When the process finishes its burst of submissions (or a threshold is reached), the plug is ``unplugged,'' and the accumulated bios are merged and dispatched in a batch. This batching dramatically improves merge rates for sequential and semi-sequential workloads. Without plugging, each bio would be dispatched individually, missing merge opportunities.
+
+\subsection{blk-mq: The Multi-Queue Block Layer}
+
+The original Linux block layer used a single request queue per device, protected by a single spinlock. This design became a severe scalability bottleneck on modern multi-core systems with high-IOPS NVMe devices capable of millions of operations per second. The \textbf{blk-mq} (multi-queue block layer), merged into the kernel in version 3.13 and now the only block layer implementation, replaces the single queue with a two-level queuing architecture.
+
+At the first level, blk-mq provides one \textbf{software staging queue} per CPU (or per NUMA node, depending on configuration). Each CPU submits I/O to its own queue without contending for a global lock. At the second level, blk-mq provides one or more \textbf{hardware dispatch queues} that map to the device's actual submission queues. For an NVMe device with 64 I/O submission queues, blk-mq can map software queues to hardware queues in a way that maximizes parallelism and minimizes cross-CPU contention.
+
+The blk-mq architecture eliminated the single-queue bottleneck and enabled Linux to drive NVMe devices at their rated IOPS. On a modern server with a high-end NVMe SSD, the block layer can sustain over one million 4K random read IOPS with sub-10-microsecond average latency --- performance that was impossible with the legacy single-queue design.
+
+%% ---------------------------------------------------------------------------
+\section{I/O Schedulers}
+\label{sec:io-schedulers}
+%% ---------------------------------------------------------------------------
+
+An \textbf{I/O scheduler} reorders and batches requests in the block layer's queues to optimize device throughput, latency, or fairness. The choice of scheduler depends on the characteristics of the underlying device and the workload.
+
+\subsection{mq-deadline}
+
+The \textbf{mq-deadline} scheduler is the multi-queue successor to the legacy deadline scheduler. It maintains two sorted queues (one for reads, one for writes) ordered by sector address, plus two FIFO queues ordered by submission time. Requests are normally dispatched from the sorted queues to maximize sequential access, but if a request has waited longer than its deadline (configurable, defaulting to 500 ms for reads and 5 seconds for writes), it is promoted from the FIFO queue. mq-deadline provides predictable worst-case latency and is a good general-purpose choice, particularly for devices that benefit from sequential access patterns such as HDDs and some SATA SSDs.
+
+\subsection{BFQ (Budget Fair Queueing)}
+
+\textbf{BFQ} is a proportional-share I/O scheduler designed for fairness and low interactive latency. BFQ assigns each process a ``budget'' of sectors it is allowed to dispatch before yielding to other processes. By tracking the sequential or random nature of each process's I/O pattern, BFQ can give sequential readers larger budgets (improving throughput) while ensuring that interactive or latency-sensitive processes receive timely service. BFQ is particularly effective on HDDs and slower SSDs where I/O scheduling decisions have a large impact on perceived responsiveness. It is the recommended scheduler for desktop and interactive workloads.
+
+\subsection{Kyber}
+
+\textbf{Kyber} is a lightweight scheduler designed for fast devices (NVMe SSDs) where the goal is to manage queue depth and latency targets rather than to reorder requests for seek optimization. Kyber divides I/O into two categories --- synchronous (reads) and asynchronous (writes) --- and dynamically throttles each category to meet configurable latency targets. When read latency exceeds the target, Kyber reduces the number of outstanding write requests to free device resources for reads. Kyber adds minimal overhead, making it suitable for high-IOPS devices where scheduler processing time matters.
+
+\subsection{none (No Scheduler)}
+
+The \textbf{none} scheduler bypasses all reordering and simply passes requests through a FIFO. This is the optimal choice for NVMe devices that have sophisticated internal scheduling, large numbers of hardware queues, and no seek penalty. Adding a software scheduler to such devices introduces latency and CPU overhead without benefit. Most NVMe devices in production run with the \texttt{none} scheduler, and many Linux distributions now default to \texttt{none} for NVMe.
+
+The active scheduler for a device can be queried and changed at runtime through \texttt{/sys/block/<device>/queue/scheduler}. The file shows all available schedulers with the current one enclosed in brackets.
+
+%% ---------------------------------------------------------------------------
+\section{sysfs Topology Exposure and Queue Parameters}
+\label{sec:sysfs}
+%% ---------------------------------------------------------------------------
+
+The kernel exposes extensive information about each block device through the \texttt{/sys/block/} sysfs hierarchy. These files allow administrators and storage software to discover device capabilities and tune behavior at runtime.
+
+The \texttt{/sys/block/<dev>/queue/} directory contains parameters that govern block layer behavior for the device. Key parameters include:
+
+\begin{itemize}
+  \item \texttt{scheduler} --- the active I/O scheduler, as described above.
+  \item \texttt{nr\_requests} --- the maximum number of requests that can be queued in the block layer for this device. Increasing this value allows deeper queuing, which can improve throughput on devices with high internal parallelism but may increase latency for competing workloads.
+  \item \texttt{rotational} --- set to \texttt{1} for rotational (HDD) devices and \texttt{0} for non-rotational (SSD/NVMe) devices. The kernel, filesystems, and I/O schedulers use this hint to adjust their behavior --- for example, disabling seek-based reordering for SSDs.
+  \item \texttt{read\_ahead\_kb} --- the amount of data the kernel reads ahead during sequential access, in kilobytes. Larger values improve sequential throughput but waste bandwidth and memory for random workloads.
+  \item \texttt{max\_sectors\_kb} --- the maximum size of a single I/O request sent to the device, in kilobytes. This is constrained by driver and hardware limits.
+  \item \texttt{logical\_block\_size} and \texttt{physical\_block\_size} --- the minimum addressable unit from the host's perspective and the device's native sector size, respectively. Misaligned I/O (writes smaller than or misaligned with the physical block size) can cause read-modify-write overhead on the device.
+  \item \texttt{optimal\_io\_size} and \texttt{minimum\_io\_size} --- hints from the device about preferred I/O alignment, often reflecting RAID stripe widths or internal erase block sizes.
+\end{itemize}
+
+Filesystem formatting tools (\texttt{mkfs.xfs}, \texttt{mkfs.ext4}) read these topology parameters to align allocation group boundaries, stripe units, and inode sizes to the underlying device geometry. Correct alignment avoids write amplification caused by misaligned I/O crossing device-internal boundaries.
+
+%% ---------------------------------------------------------------------------
+\section{The SCSI Subsystem}
+\label{sec:scsi}
+%% ---------------------------------------------------------------------------
+
+The \textbf{SCSI subsystem} in Linux handles far more than just devices attached to parallel SCSI cables. It is a generic command-transport framework used by SAS (Serial Attached SCSI), Fibre Channel, iSCSI, USB mass storage, and even SATA drives (via the \texttt{libata} translation layer). Understanding the SCSI subsystem is essential because the majority of enterprise storage --- SAN-attached LUNs, SAS disk shelves, tape libraries --- communicates through SCSI commands.
+
+\subsection{The SCSI Command Set}
+
+SCSI devices communicate through \textbf{Command Descriptor Blocks (CDBs)}, fixed-format binary commands that encode an operation code and its parameters. The primary commands for block storage are \texttt{READ(10)}, \texttt{READ(16)}, \texttt{WRITE(10)}, \texttt{WRITE(16)}, \texttt{INQUIRY}, \texttt{TEST UNIT READY}, \texttt{MODE SENSE}, \texttt{MODE SELECT}, \texttt{FORMAT UNIT}, and \texttt{SYNCHRONIZE CACHE}. The ``10'' and ``16'' refer to the CDB length in bytes; the 16-byte variants support larger LBA addressing for devices exceeding 2 TB.
+
+The SCSI specification also defines the \texttt{UNMAP} command (analogous to ATA TRIM) for thin-provisioned and SSD-backed LUNs, and the \texttt{WRITE SAME} command for efficiently zeroing or pattern-filling large regions.
+
+\subsection{HBA Drivers and the SCSI Midlayer}
+
+A \textbf{Host Bus Adapter (HBA)} is the physical controller that connects the server to a SCSI transport --- a SAS HBA, a Fibre Channel HBA, or an iSCSI initiator (software or hardware offload). Each HBA type has a kernel driver that registers with the \textbf{SCSI midlayer}, the kernel subsystem that provides a uniform interface between upper-layer SCSI drivers and lower-layer HBA drivers.
+
+The SCSI midlayer manages device discovery (scanning for LUNs), error handling and recovery (abort, device reset, bus reset sequences), and command queuing. It translates generic block-layer requests into SCSI CDBs, passes them to the HBA driver for transmission, and handles completions and errors returned by the HBA.
+
+\subsection{sd and sg Devices}
+
+The \textbf{sd} (SCSI disk) driver is the upper-layer driver that creates \texttt{/dev/sdX} block devices for each SCSI-addressed disk LUN. The sd driver handles partition table parsing, capacity detection, and the translation of block-layer requests into SCSI read/write CDBs.
+
+The \textbf{sg} (SCSI generic) driver provides a raw passthrough interface at \texttt{/dev/sgN}, allowing userspace applications to send arbitrary SCSI CDBs to a device. This is used by diagnostic tools (\texttt{sg\_inq}, \texttt{sg\_ses}, \texttt{smartctl}), storage management software, and tape backup applications that need to issue commands beyond the standard read/write set.
+
+%% ---------------------------------------------------------------------------
+\section{The NVMe Subsystem}
+\label{sec:nvme}
+%% ---------------------------------------------------------------------------
+
+The \textbf{NVMe (Non-Volatile Memory Express)} subsystem is the kernel's interface to NVMe storage devices attached over PCIe, NVMe-oF (NVMe over Fabrics), or other NVMe transports. NVMe was designed from the ground up for flash and byte-addressable persistent media, and its architecture reflects this: deep parallelism, minimal command overhead, and a streamlined command set.
+
+\subsection{The NVMe Command Set}
+
+The NVMe command set is divided into \textbf{Admin commands} and \textbf{I/O commands}. Admin commands manage the controller and its namespaces: \texttt{Identify} (query controller and namespace capabilities), \texttt{Create I/O Submission Queue}, \texttt{Create I/O Completion Queue}, \texttt{Set Features}, \texttt{Get Features}, \texttt{Firmware Commit}, \texttt{Firmware Image Download}, \texttt{Format NVM}, and \texttt{Sanitize}. I/O commands handle data transfer: \texttt{Read}, \texttt{Write}, \texttt{Flush}, \texttt{Write Zeroes}, \texttt{Dataset Management} (including deallocation/TRIM), and \texttt{Compare}.
+
+Each NVMe command is a 64-byte structure placed in a submission queue. The command includes an opcode, the namespace ID, starting LBA, number of logical blocks, and pointers to data buffers described by Physical Region Pages (PRPs) or Scatter-Gather Lists (SGLs).
+
+\subsection{Namespaces vs.\ SCSI LUNs}
+
+In SCSI, the unit of addressable storage is a \textbf{Logical Unit Number (LUN)} --- a logical disk presented by a storage controller or array. LUN addressing is hierarchical: host adapter, channel, target ID, and LUN number. The LUN abstraction was designed for shared storage arrays where a single target (array controller) presents multiple logical disks to multiple initiators (servers).
+
+NVMe replaces this with \textbf{namespaces}. A namespace is an independent, addressable collection of logical blocks within an NVMe controller. Each namespace has its own LBA range, format (block size, metadata size), and can have independent access control. Unlike SCSI LUNs, which carry the conceptual overhead of the initiator-target-LUN hierarchy, NVMe namespaces are a flat addressing model: controller number plus namespace ID. A single NVMe controller can support up to 65,535 namespaces (though most SSDs expose one or a small number).
+
+The namespace model offers several advantages for multi-tenant and virtualized environments. Different namespaces can be assigned to different virtual machines or containers through NVMe namespace management and NVMe SR-IOV (Single Root I/O Virtualization), providing hardware-level isolation without the complexity of SCSI LUN masking and zoning.
+
+\subsection{NVMe Queues: Submission and Completion}
+
+NVMe's queue architecture is the key to its performance. An NVMe controller supports one \textbf{Admin Submission Queue} and one \textbf{Admin Completion Queue} for management commands, plus up to 65,535 \textbf{I/O Submission Queues} (SQs) and an equal number of \textbf{I/O Completion Queues} (CQs) for data commands.
+
+Each submission queue is a circular buffer in host memory where the host places 64-byte command entries. After writing one or more commands, the host writes the new tail pointer to the controller's \textbf{doorbell register} (a memory-mapped register in PCIe BAR space), notifying the controller that new commands are available. The controller fetches commands from the submission queue via DMA, processes them, and writes 16-byte completion entries to the associated completion queue. The host is notified via MSI-X interrupts, one per completion queue (or shared, depending on configuration).
+
+This architecture allows extreme parallelism. A typical NVMe SSD is configured with one I/O submission/completion queue pair per CPU core. Each core submits and processes completions on its own queue pair without any locking or cross-CPU synchronization. Combined with the blk-mq block layer, this delivers millions of IOPS with minimal software overhead. The admin queue pair is separate and used only for management operations, ensuring that administrative commands do not contend with high-speed data I/O.
+
+%% ---------------------------------------------------------------------------
+\section{From read() to Block I/O: A Detailed Walkthrough}
+\label{sec:read-to-bio}
+%% ---------------------------------------------------------------------------
+
+To consolidate the concepts introduced in this chapter, this section traces a single \texttt{read()} system call from a userspace application through every layer of the Linux storage stack, showing how the bio and request structures are created and consumed.
+
+Consider an application that calls \texttt{read(fd, buf, 4096)} on a file stored in an ext4 filesystem mounted on \texttt{/dev/nvme0n1p2}. The kernel proceeds as follows:
+
+The system call enters the kernel and reaches the VFS layer. VFS looks up the file's inode from the dentry cache and calls \texttt{ext4\_file\_read\_iter()}, the ext4 filesystem's implementation of the \texttt{read\_iter} file operation. The ext4 read path first checks the page cache. If the requested page is cached and up to date, the data is copied directly into the application's buffer and the system call returns --- no block I/O is generated.
+
+If the page is not in the cache, ext4 allocates a new page in the page cache and must fill it with data from disk. ext4 consults its extent tree to map the file offset to a logical block address on the block device. For a 4 KB read at file offset 0 on a filesystem with 4 KB blocks, this might resolve to LBA 1048576 on the underlying partition device. ext4 then allocates a bio structure, setting \texttt{bi\_bdev} to the block device for \texttt{/dev/nvme0n1p2}, \texttt{bi\_iter.bi\_sector} to the corresponding sector number, \texttt{bi\_opf} to \texttt{REQ\_OP\_READ}, and adding a bio\_vec entry pointing to the newly allocated page cache page.
+
+The bio is submitted to the block layer via \texttt{submit\_bio()}. If the current process has an active plug, the bio is added to the plug list. When the plug is released, the block layer attempts to merge the bio with existing requests. For an isolated 4 KB read, no merge is likely, and a new \texttt{struct request} is created wrapping this single bio. The request is placed on the per-CPU software staging queue in blk-mq.
+
+The blk-mq dispatch logic moves the request from the software queue to the appropriate hardware dispatch queue. For an NVMe device, this maps to a specific I/O submission queue. The NVMe driver's \texttt{queue\_rq} callback constructs a 64-byte NVMe Read command from the request, writes it into the submission queue ring buffer, and updates the submission queue tail doorbell register.
+
+The NVMe controller fetches the command via DMA, reads the data from NAND flash (involving the controller's internal FTL, ECC, and read path), DMA-transfers the data into the page cache page specified in the command's PRP list, writes a completion entry to the completion queue, and raises an MSI-X interrupt.
+
+The NVMe interrupt handler on the relevant CPU processes the completion, marks the request as complete, and triggers the block layer's completion path. The page cache page is marked up-to-date. The waiting process is woken, and the VFS layer copies the data from the page cache page into the application's userspace buffer. The \texttt{read()} system call returns 4096.
+
+The entire sequence --- from system call to data in the application buffer --- takes on the order of 10--100 microseconds for an NVMe SSD, depending on device latency, queue depth, and whether the NVMe controller's internal cache can serve the request. For a rotational HDD, the same path applies up to the device driver, but the hardware execution takes 5--15 milliseconds due to seek and rotational latency.
+
+%% ---------------------------------------------------------------------------
+\section{Security and Governance}
+\label{sec:block-security}
+%% ---------------------------------------------------------------------------
+
+\begin{securitybox}
+
+\subsection*{Device-Level Access Control}
+
+Linux provides two primary mechanisms for restricting access to block devices. First, \textbf{udev rules} can set ownership and permissions on device nodes as they are created. A rule such as \texttt{KERNEL=="sd*", GROUP="disk", MODE="0660"} ensures that only users in the \texttt{disk} group can open SCSI disk devices. More granular rules can match on device attributes (vendor, serial number, bus path) to set permissions on specific devices.
+
+Second, the \textbf{device cgroup controller} (available in cgroups v2) restricts which devices a process group may access, identified by major:minor number and access type (read, write, mknod). Container runtimes use the device cgroup to prevent containers from accessing host block devices. By default, containers have no access to any block device outside their assigned storage; the runtime must explicitly whitelist specific major:minor pairs for devices that the container is intended to use. This is the primary mechanism for preventing a compromised container from reading raw host disks.
+
+\subsection*{Secure Erase and Cryptographic Erase}
+
+When decommissioning storage or reassigning drives between tenants, data sanitization is critical. NVMe drives support the \textbf{Sanitize} command, which performs a device-level erase that is cryptographically or physically irreversible depending on the method: \texttt{Block Erase} (erases all NAND blocks), \texttt{Crypto Erase} (destroys the internal media encryption key, rendering all data unrecoverable if the drive implements self-encrypting drive capabilities), or \texttt{Overwrite} (writes a fixed pattern to all user-accessible LBAs). Crypto erase completes in seconds regardless of drive capacity, making it the preferred method for drives with hardware encryption.
+
+For SCSI devices, the equivalent operation is the \texttt{FORMAT UNIT} command with a security initialization option, or vendor-specific secure erase commands. SCSI secure erase is generally slower than NVMe sanitize and less standardized across vendors. Organizations with strict compliance requirements (NIST 800-88 guidelines) should verify that the sanitize method used meets their classification level.
+
+\subsection*{Multi-Tenant and Container Isolation}
+
+In multi-tenant environments --- whether virtualized or containerized --- preventing unauthorized access to block devices requires defense in depth. The device cgroup controller provides the first layer. \textbf{Linux namespaces} (specifically, the mount namespace and the device namespace) provide the second layer, ensuring that containers cannot see or mount host block devices that have not been explicitly bind-mounted into the container's filesystem. \textbf{Seccomp filters} can further restrict the system calls available to container processes, blocking \texttt{mount()}, \texttt{mknod()}, and raw device \texttt{ioctl()} calls.
+
+For stronger isolation, NVMe namespace assignment through SR-IOV or NVMe Virtual Functions provides hardware-level separation. Each VM or container receives a dedicated NVMe namespace presented as a physical function, with the controller enforcing access boundaries in hardware. This eliminates reliance on kernel-level software isolation for the data path.
+
+\subsection*{Audit Logging of Block Device Operations}
+
+The Linux \textbf{auditd} subsystem can log block device operations for compliance and forensic purposes. Audit rules can be configured to monitor opens, reads, and writes to specific device files. For example, the rule \texttt{-w /dev/sda -p rw -k disk\_access} logs all read and write opens to \texttt{/dev/sda} with the key \texttt{disk\_access}. In high-security environments, audit rules on \texttt{/dev/} device nodes and on the \texttt{mount} system call provide a record of which processes accessed which storage devices and when. Audit logs should be forwarded to a centralized log management system to prevent tampering by a compromised host.
+
+\subsection*{Firmware Signing and Supply Chain Integrity}
+
+Modern NVMe drives support \textbf{firmware signing and verification}. The NVMe specification defines the \texttt{Firmware Commit} and \texttt{Firmware Image Download} admin commands, and enterprise-grade drives verify firmware images against a manufacturer's digital signature before activating them. This prevents installation of tampered firmware that could exfiltrate data, bypass encryption, or introduce persistent backdoors at the storage layer.
+
+Supply chain integrity extends beyond firmware. Organizations should verify that drives received from distributors have not been tampered with by checking manufacturer seals, verifying firmware versions against known-good baselines using the NVMe \texttt{Identify Controller} data structure, and monitoring for anomalous drive behavior (unexpected latency spikes, unexplained capacity changes) that could indicate firmware manipulation. The TCG (Trusted Computing Group) Opal specification provides a framework for drive-level authentication and locking that integrates with platform secure boot chains.
+
+\end{securitybox}
+
+% === Physical Storage Media (from original chapter) ===
+
+\section{Magnetic Storage: Hard Disk Drive Internals}
+Despite decades of prediction that HDDs would soon be displaced entirely, magnetic hard disk drives remain the dominant medium for bulk capacity storage in 2026. The economics of magnetic recording continue to improve, with enterprise drives now shipping at capacities exceeding 30 TB. Understanding how a modern HDD works is essential not only for direct use but because many storage system abstractions were designed around HDD characteristics that persist in legacy environments.
+
+\section{Mechanical Components and Physical Layout}
+A hard disk drive enclosure contains a spindle assembly holding one or more aluminum or glass platters coated with a ferromagnetic material, typically a cobalt-based alloy. Enterprise drives typically use between three and ten platters. Each platter surface is served by a read/write head mounted on an actuator arm. All arms are mechanically ganged to a single voice coil actuator, which means they all move together --- the drive cannot position the heads on different tracks simultaneously on different surfaces. This ganged architecture is a fundamental constraint that has shaped RAID and storage array design for decades.
+
+The read/write head in a modern drive flies at a distance of only a few nanometers above the platter surface --- a gap so small that a human fingerprint's oils, a dust particle, or condensation would cause a head crash. The head assembly never actually contacts the rotating platter during normal operation; it rides on a thin layer of air dragged by the spinning disk, a phenomenon called air bearing. Modern drives contain sealed enclosures either in a standard atmosphere or, for high-capacity drives, helium-filled enclosures to reduce turbulence and power consumption.
+
+Data is recorded along concentric circles called tracks. All tracks at the same radial position across all platters form a cylinder --- a concept important for understanding how the file system and operating system traditionally placed related data to minimize seeks. Each track is divided into sectors, historically 512 bytes per sector (logical block addressing) and now commonly 4,096 bytes in physical sector size (Advanced Format or AF drives). Many drives expose a 512-byte logical sector interface to the host while internally using 4K physical sectors --- referred to as 512e (512-byte emulation). Drives that expose 4K sectors natively are 4Kn drives, which require host-side alignment awareness.
+
+\section{The Actuator and Seek Mechanics}
+The voice coil actuator controls the radial position of the arm assembly. A seek operation --- moving the heads from one track to another --- involves three phases: acceleration, coasting, and deceleration. The time for this operation is the seek time, typically between 0.5 ms and 8 ms for enterprise drives depending on distance. After the head reaches the correct track, the drive must wait for the target sector to rotate under the head: this is rotational latency, averaging half the rotation time. At 7,200 RPM (the standard for enterprise nearline drives), one full rotation takes 8.33 ms, so average rotational latency is approximately 4.17 ms. Combined with an average seek time of around 4--5 ms for a random access, the average service time for a random I/O on a 7,200 RPM drive approaches 8--10 ms --- an eternity compared to flash storage.
+
+Enterprise drives historically spun at 10,000 or 15,000 RPM to reduce rotational latency (2.0 ms average at 15K RPM), but these high-RPM drives have largely been displaced by SSDs in performance-sensitive roles. The economics no longer favor 15K SAS drives for most workloads.
+
+Sequential access characteristics are far more favorable than random access. A drive streaming data from a large sequential file avoids seek operations entirely and delivers throughput determined primarily by the linear bit density and spindle speed --- typically 200--300 MB/s for a modern 7,200 RPM nearline drive.
+
+\section{Zoned Storage and Shingled Magnetic Recording (SMR)}
+Conventional magnetic recording (CMR) writes tracks with a gap between them to allow for actuator positioning inaccuracy. Shingled Magnetic Recording (SMR) overlaps tracks like shingles on a roof, writing each new track partially over the previous one. Because read heads are narrower than write heads, the overlapped data can still be read, but writing to an existing track damages adjacent tracks. This forces SMR drives to organize data into zones --- sequential write zones where data is appended and rewrites require reading the zone, modifying it in a buffer, and rewriting the entire zone. This process, called zone reset or zone append, is managed either by drive firmware (drive-managed SMR or DM-SMR) or exposed directly to the host (host-managed SMR or HM-SMR).
+
+DM-SMR drives present a conventional block interface and handle zone management internally, but the write amplification and variable latency from zone reclamation make them problematic for random-write workloads. Many hyperscaler deployments that caused early compatibility problems with DM-SMR drives led to clear labeling requirements. Host-managed SMR with the Zoned Block Commands (ZBC/ZAC) interface exposes the zone structure to the host, allowing filesystems and storage applications to drive sequential access patterns deliberately. ZNS (Zoned Namespace) SSDs extend this model to flash, as discussed later.
+
+\section{Firmware, DRAM Caches, and Write Buffering}
+Modern HDDs contain sophisticated embedded processors running a RTOS (real-time operating system) with firmware that handles servo control, error correction, bad-sector remapping, and caching. The drive's DRAM cache (typically 128 MB to 512 MB in enterprise drives) buffers writes and enables read-ahead. Importantly, drives can acknowledge write completion before data reaches stable media (write cache enabled), creating a data-at-risk window on power failure. Enterprise drives exposed to UPS-protected environments often enable write cache for throughput; drives in uncertain power environments or in critical data paths should have write cache disabled or use power-loss protection circuitry.
+
+Error correction in modern drives uses LDPC (Low-Density Parity-Check) codes, which provide strong error correction capability. The uncorrectable bit error rate (UBER) for enterprise HDDs is typically rated at 10$^{-15}$ bits, meaning statistically one unrecoverable read error per 10$^{15}$ bits read. As drive capacities approach 30+ TB, a full sequential scan covers approximately 2.4 $\times$ 10$^{11}$ bits, so UBER statistics remain manageable --- but RAID rebuild scenarios scanning multiple large drives simultaneously create real exposure to unrecoverable errors, motivating the use of RAID-6 (dual parity) for drives larger than a few terabytes.
+
+\section{Solid-State Storage: NAND Flash Architecture}
+NAND flash is the dominant storage medium for performance-critical applications and, increasingly, for cost-sensitive applications as price-per-bit continues to decline. Understanding NAND cell types, their organization, and their management is critical for making correct trade-offs between performance, endurance, and cost.
+
+\section{NAND Cell Types: SLC, MLC, TLC, and QLC}
+Flash memory stores data as charge levels in floating-gate transistors (or, in newer designs, charge-trap cells). The number of distinct charge levels a cell can hold determines how many bits it stores:
+
+\begin{itemize}
+  \item • \textbf{Single-Level Cell (SLC)}: One bit per cell --- two voltage states (charged or not). Highest endurance (typically 50,000--100,000 program/erase cycles), best write performance, lowest density. Used in industrial applications and as SLC caching layers in enterprise SSDs.
+  \item \textbf{Multi-Level Cell (MLC)}: Two bits per cell --- four voltage states. Endurance of 3,000--10,000 P/E cycles depending on process node. This tier historically served the enterprise SSD market as "eMLC" (enterprise MLC, manufactured with tighter process controls).
+  \item \textbf{Triple-Level Cell (TLC)}: Three bits per cell --- eight voltage states. Endurance of 1,000--3,000 P/E cycles. Now the dominant cell type for consumer and mainstream enterprise SSDs, offering a good balance of density and durability.
+  \item \textbf{Quad-Level Cell (QLC)}: Four bits per cell --- sixteen voltage states. Endurance of 100--1,000 P/E cycles. The lowest endurance tier, suited for read-intensive workloads (object storage read cache, warm data tiers) rather than write-intensive applications.
+\end{itemize}
+
+As more bits are stored per cell, the voltage windows between states narrow, making correct readback increasingly difficult. Error correction requirements grow substantially from SLC to QLC, increasing both controller complexity and read latency. QLC drives require stronger ECC (often LDPC with iterative decoding), and their read latency is measurably higher than TLC drives, particularly as cells age.
+
+The progression from SLC to QLC represents the semiconductor industry's primary lever for increasing bit density and reducing cost-per-bit, but each step trades away endurance and write performance. A storage architect must match cell type to workload write intensity.
+
+\section{3D NAND and Cell Structure}
+Planar (2D) NAND scaling hit physical limits in the 15--20 nm range due to interference between adjacent cells. All major NAND manufacturers (Samsung, SK Hynix, Micron, Kioxia/Western Digital, YMTC) now produce 3D NAND, stacking cell layers vertically on the die. Current-generation devices stack 200--300+ layers, with manufacturers continuing to push higher layer counts.
+
+3D NAND introduces charge-trap flash (CTF) in many implementations, replacing the floating gate with a charge-trap layer. CTF cells are more resistant to interference from adjacent cells in dense 3D stacks. The tradeoff is that charge-trap cells can exhibit higher program disturb and retention challenges over time compared to floating gate, which influences the drive's internal error management.
+
+\section{The Flash Translation Layer (FTL)}
+NAND flash has a fundamental constraint that differentiates it from magnetic storage: writes must be preceded by an erase operation, and erase operations work on a much larger unit (an erase block, typically 3--6 MB) than write operations (a page, typically 4--16 KB). You cannot overwrite a page in-place; you must erase the block and then rewrite. This constraint gives rise to the Flash Translation Layer --- a software layer within the SSD controller (or in-host storage stack for Open-Channel/ZNS) that manages the mapping between host logical block addresses and physical NAND locations.
+
+The FTL performs several critical functions:
+
+\textbf{Logical-to-physical mapping}: The FTL maintains a mapping table (often several hundred MB to several GB in size, held in controller DRAM) that translates each host LBA to its current physical NAND page location. This indirection layer allows the FTL to place writes wherever physical space is available, independent of logical address.
+
+\textbf{Wear leveling}: To prevent any group of NAND blocks from being worn out disproportionately, the FTL distributes writes across all erase blocks. Dynamic wear leveling moves frequently written data across blocks over time. Static wear leveling additionally moves cold (rarely updated) data to wear-equalize blocks that would otherwise sit at low erase counts forever.
+
+\textbf{Garbage collection}: As logical blocks are overwritten, the old physical pages become stale (valid data has moved elsewhere) but remain in the erase block alongside live data. When the drive needs free blocks, it must perform garbage collection: reading all live pages from a partially-stale block, writing them elsewhere, then erasing the block. Garbage collection consumes drive resources and contributes to write amplification.
+
+\textbf{Write amplification}: The write amplification factor (WAF) is the ratio of NAND writes to host writes. An ideal WAF of 1.0 means every host write causes exactly one NAND write. In practice, garbage collection increases WAF significantly, particularly as the drive fills up. A drive at 75--90\% full incurs dramatically higher WAF than a drive at 50\% full due to reduced free space for garbage collection. This is why SSDs are often operated at a rated capacity below physical NAND capacity --- the difference is over-provisioning (OP). Enterprise SSDs typically carry 20--30\% over-provisioning versus consumer SSDs at 7--10\%.
+
+\textbf{TRIM / Unmap}: The TRIM command (ATA) or UNMAP command (SCSI/NVMe Deallocate) allows the host to inform the SSD that logical blocks are no longer in use. Without TRIM, the FTL has no way to know which logical blocks contain garbage versus live data from the host's perspective. TRIM allows the FTL to mark those pages as invalid immediately, reducing the garbage collection burden and improving long-term performance. TRIM is critical in virtualized environments and is now universally supported by modern SSDs and operating systems.
+
+\section{Zoned Namespace SSDs (ZNS)}
+Zoned Namespace SSDs expose the sequential-write constraint of NAND groups directly to the host, eliminating the need for the FTL to perform garbage collection internally. The host is responsible for writing sequentially to zones and explicitly resetting them when they are no longer needed. This approach reduces WAF to near 1.0 and dramatically reduces the DRAM needed for mapping tables on the device. The tradeoff is that the host software stack (filesystem, storage engine) must be zone-aware. RocksDB, used by Meta and others for key-value workloads, has been adapted to support ZNS. The NVMe ZNS specification standardizes this interface.
+
+\section{NVMe Architecture: PCIe Lanes and Queue Depth}
+The Non-Volatile Memory Express (NVMe) specification was designed from the ground up for flash and persistent memory, replacing the AHCI protocol designed for spinning disks. The fundamental insight behind NVMe is that flash has no rotational latency and can service many requests concurrently; AHCI's single command queue of 32 entries is a severe bottleneck.
+
+\section{PCIe Attachment}
+NVMe devices attach over PCIe, the same high-bandwidth serial interface used for GPUs and network adapters. PCIe lanes come in widths of $\times$1, $\times$2, $\times$4, $\times$8, and $\times$16. NVMe SSDs typically use PCIe $\times$4, providing the following bandwidth:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+& & \\
+PCIe 3.0 & 985 MB/s & \~{}3.94 GB/s \\
+PCIe 4.0 & 1.969 GB/s & \~{}7.88 GB/s \\
+PCIe 5.0 & 3.938 GB/s & \~{}15.75 GB/s \\
+PCIe 6.0 & 7.877 GB/s & \~{}31.5 GB/s \\
+\end{longtable}
+
+Current-generation NVMe enterprise SSDs on PCIe 5.0 can sustain sequential reads approaching 14--15 GB/s per device. Servers with multiple NVMe drives can aggregate these independently, unlike SATA which shares bandwidth through a controller.
+
+\section{Submission and Completion Queues}
+NVMe exposes up to 65,535 I/O submission queues (SQs) and completion queues (CQs), each capable of holding up to 65,535 entries. Queues are placed in host memory (DRAM or PMem) and the NVMe controller reads from and writes to them via PCIe DMA. Each CPU core typically has its own SQ/CQ pair, eliminating lock contention. This is architecturally distinct from SAS/SATA, where a single shared queue creates CPU serialization at high queue depths.
+
+A submission queue entry (SQE) is 64 bytes and contains the opcode, LBA, length, and data buffer pointer (as a Physical Region Page or Scatter-Gather List). The controller processes commands from the SQ, performs the operation, and posts a completion queue entry (CQE) --- 16 bytes --- to the CQ. The host is notified via interrupt (MSI-X) or can poll the CQ directly. Polling (used in latency-sensitive applications) eliminates interrupt processing overhead at the cost of a dedicated CPU thread.
+
+The parallelism of NVMe queues maps naturally to the parallel structure of NAND flash inside the device. A modern NVMe SSD contains multiple NAND channels, each with multiple chips, each with multiple dies, each with multiple planes. The FTL distributes commands across this internal parallelism. With hundreds of outstanding commands, the device can achieve IOPS in the millions.
+
+\section{NVMe Namespaces}
+NVMe introduces the concept of namespaces --- independently addressable logical storage units within a single physical NVMe controller. A namespace is analogous to an LUN in SAN terminology. Multiple namespaces can share the same physical media or be allocated to separate NAND banks. Namespaces can be private (attached to a single host port) or shared (accessible from multiple ports simultaneously, relevant for NVMe over Fabrics active-active configurations). Each namespace has its own namespace ID (NSID), size, and formatting parameters.
+
+\section{NVMe over Fabrics (NVMe-oF)}
+NVMe over Fabrics extends the NVMe command set across a network fabric, delivering low-latency shared NVMe storage. The NVMe-oF specification defines a common command set and transport-specific bindings:
+
+\textbf{NVMe/RDMA (RoCEv2 or iWARP)}: Commands and data are carried over RDMA, enabling remote NVMe access with latency approaching that of local NVMe (sub-100 µs end-to-end). Requires a lossless network fabric (Priority Flow Control for RoCEv2).
+
+\textbf{NVMe/FC}: NVMe commands carried over Fibre Channel at 32 or 64 Gb/s. Preferred in environments with existing FC infrastructure. Latency and reliability characteristics are similar to traditional FC SAN with the added benefit of the NVMe queue model.
+
+\textbf{NVMe/TCP}: NVMe commands carried over standard TCP/IP, requiring no specialized hardware beyond a standard NIC. Latency is higher than RDMA-based transports (typically 200--500 µs RTT over a local network) but this transport is compelling for its universality and ease of deployment. NVMe/TCP is the fastest-growing NVMe-oF transport in enterprise deployments as of 2025--2026.
+
+The NVMe-oF discovery service allows initiators to locate target subsystems automatically, analogous to iSNS for iSCSI. The Asymmetric Namespace Access (ANA) feature allows multi-path access to a namespace across multiple controllers, with optimized and non-optimized paths, enabling transparent failover and load balancing.
+
+\section{Persistent Memory (PMem)}
+Persistent memory occupies a tier between DRAM and NAND flash: byte-addressable like DRAM, but non-volatile and significantly denser. The canonical example was Intel Optane DC Persistent Memory (DCPMM), based on 3D XPoint technology --- a phase-change memory variant that stored data in the resistance of a chalcogenide material rather than in charge. Intel discontinued Optane in 2022--2023, but the architectural patterns it established remain relevant as CXL-attached memory and other PMem technologies continue development.
+
+\section{Intel Optane Architecture and Access Models}
+Optane DCPMM installed in DDR4 DIMM slots alongside DRAM, directly on the memory bus. This gave it access latencies measured in hundreds of nanoseconds (approximately 300 ns for reads vs. 80--100 ns for DRAM) compared to microseconds for NVMe. The capacity advantage was substantial: a 2-socket server could host 6 TB of Optane DCPMM per socket versus tens of GB of DRAM at similar cost.
+
+Optane operated in two primary modes:
+
+\textbf{Memory Mode}: The DCPMM acted as a large, non-persistent memory pool, with installed DRAM serving as a direct-mapped cache. Applications saw a large address space but with no persistence guarantees. Memory Mode was transparent to applications but offered higher effective DRAM capacity at the cost of access latency.
+
+\textbf{App Direct Mode}: The DCPMM was exposed as a persistent memory device, accessible via standard file I/O through a DAX-enabled filesystem (Direct Access), or directly via memory-mapped files (mmap). In DAX mode, reads and writes went directly to the physical media without passing through the page cache, eliminating kernel buffering and enabling true persistence at DRAM-like speeds. Databases like SAP HANA, Oracle Database, and Redis Enterprise were adapted to use App Direct mode for transaction logs and hot working sets.
+
+The persistence guarantee in PMem requires careful software handling. CPU store instructions write to CPU registers and then to the CPU's write buffer; data is not guaranteed persistent until it has been flushed to the PMem media. Applications must issue persistent flush instructions (CLWB --- Cache Line Write Back --- followed by SFENCE, or the newer CLFLUSHOPT) after writes to ensure data survives a power failure. Failure to do so creates a potential data corruption window, a new class of bug in PMem-aware software.
+
+\section{CXL-Attached Memory and the Post-Optane Landscape}
+Compute Express Link (CXL) is a PCIe-based open interconnect protocol that defines protocols for CPU-to-device (CXL.io), CPU-to-memory (CXL.mem), and cache-coherent CPU-to-device (CXL.cache) communication. CXL 1.1/2.0 enables memory expansion: adding DRAM or persistent memory capacity attached via PCIe/CXL rather than on the native DDR bus. CXL 3.0 adds fabric capabilities, enabling memory pooling and sharing across multiple hosts.
+
+CXL memory expansion modules (CMEMs) allow servers to extend their addressable memory pool beyond what the CPU's DDR channels support. The latency penalty over the CXL link (PCIe 5.0 or 6.0) is higher than local DRAM --- typically an additional 80--200 ns --- but these modules are attractive for memory-bound workloads (in-memory databases, AI inference caches) that exceed what standard DIMM configurations can provide.
+
+Several vendors (Samsung, SK Hynix, Micron, Teledyne) are shipping CXL memory expanders. The CXL ecosystem is evolving rapidly, and it represents the most significant shift in server memory architecture since the introduction of NUMA.
+
+\section{Emerging Storage Technologies}
+\section{Computational Storage}
+Computational Storage Devices (CSDs) embed processing capability within the storage device, enabling data processing where data resides rather than shipping raw data to the host CPU. The SNIA Computational Storage Architecture defines functional models: Computational Storage Drives (CSDs) process data inline during reads/writes; Computational Storage Arrays (CSAs) perform operations on arrays; and Computational Storage Processors (CSPs) attach inline between a host and storage.
+
+Use cases include compression and decompression, encryption, regular expression matching, database projection and filtering, and video transcoding. The value proposition is eliminating the data movement bottleneck for data-intensive operations: rather than reading 100 GB of raw data to a host CPU to extract 1 GB of results, the CSD performs the filter locally and returns only the results.
+
+SNIA's CSD specification is becoming more defined, and vendors including Samsung (SmartSSD), NGD Systems, and ScaleFlux have shipped computational SSDs. Integration with query engines like Apache Arrow and columnar database systems is an active area.
+
+\section{DNA Data Storage}
+DNA data storage encodes binary data into the four-nucleotide alphabet of DNA (A, T, G, C) and synthesizes artificial DNA strands. Data is retrieved by sequencing the synthesized DNA. The theoretical storage density of DNA is approximately 10\^{}18 bytes per cubic centimeter --- orders of magnitude beyond any current media. DNA is also extraordinarily durable under the right conditions; read DNA recovered from mammoth bones 20,000 years old.
+
+Practical DNA storage today is expensive (synthesis costs dominate), slow (writing is non-random, reading via sequencing is batch-oriented), and requires specialized laboratory equipment. Microsoft Research and academic institutions have demonstrated end-to-end DNA storage systems, including an automated DNA drive prototype that synthesizes, stores, and sequences on-demand. The technology remains pre-commercial but has a clear long-term role in archival storage at planetary scale --- the entire global internet archive could theoretically fit in a few kilograms of DNA.
+
+\section{Glass and Silica Storage}
+Microsoft's Project Silica stores data in fused silica glass using femtosecond laser pulses to create voxels (3D optical patterns) within the glass matrix. Unlike optical disks that encode data on a surface, glass storage encodes in three dimensions at multiple depths. The resulting storage is essentially indestructible --- silica glass is stable for thousands of years, withstands extreme temperatures, and is immune to electromagnetic pulses. Retrieval uses machine learning-assisted optical microscopy.
+
+Glass storage is targeted at archival use cases: cultural preservation, long-term regulatory archive, hyperscaler cold tiers. Microsoft has announced plans to deploy Project Silica for Warner Bros. Discovery's media archives. The write speed is slow and the technology is write-once; read retrieval latency is measured in seconds to minutes per tile.
+
+\section{Performance Characteristics by Media Type}
+A storage architect must internalize the performance envelope of each media tier to appropriately match workloads. The table below summarizes representative characteristics:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}@{}}
+\toprule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+& & & & \\
+7,200 RPM HDD & \~{}180 & 200--300 MB/s & 8--12 ms & \~{}2M hours MTBF \\
+15,000 RPM HDD & \~{}400 & 200--250 MB/s & 4--6 ms & \~{}2M hours MTBF \\
+SATA SSD (TLC) & 90,000--100,000 & 550--560 MB/s & 70--120 µs & 1--3 DWPD \\
+SAS SSD (eMLC) & 200,000+ & 1,000+ MB/s & 100--200 µs & 3--10 DWPD \\
+NVMe SSD (TLC, PCIe 4.0) & 1,000,000+ & 7,000 MB/s & 50--100 µs & 1--3 DWPD \\
+NVMe SSD (PCIe 5.0) & 1,500,000+ & 14,000 MB/s & 20--60 µs & 1--3 DWPD \\
+Optane PMem (NVMe mode) & 2,000,000+ & 6,500 MB/s & 10--20 µs & Very high \\
+DRAM & N/A (byte-addressable) & \textgreater50 GB/s & \~{}80--100 ns & N/A (volatile) \\
+\end{longtable}
+
+DWPD = Drive Writes Per Day, assuming full-drive-capacity writes per day over the warranty period.
+
+These numbers represent individual device capabilities. In a storage array or distributed system, multiple devices operate in parallel, multiplying aggregate throughput and IOPS. The latency numbers, however, represent fundamental per-device minimums --- they cannot be parallelized away for a single I/O operation.
+
+\section{Latency vs. Throughput Trade-offs}
+A critical distinction is between latency-sensitive and throughput-sensitive workloads:
+
+\textbf{Latency-sensitive workloads} (OLTP databases, financial transaction processing, real-time analytics) care about p99 or p999 latency --- the worst-case response time that the application's most demanding transactions experience. For these workloads, NVMe or Optane-class storage is necessary, and any latency variability (from garbage collection in SSDs, from controller queue saturation) is intolerable.
+
+\textbf{Throughput-sensitive workloads} (video streaming, batch analytics, machine learning training dataset reads, large file transfers) care about MB/s or GB/s. For these, HDDs in large arrays can be cost-effective because sequential throughput scales linearly with the number of spindles, and latency matters less.
+
+\textbf{Mixed workloads} require careful analysis of the I/O size distribution and read/write ratio. Small random writes are the most punishing workload for any media --- they prevent sequential optimization on HDDs and maximize write amplification on SSDs. Understanding the workload profile through I/O characterization tools (fio, blktrace, iostat) before selecting media is not optional; it is the basis of correct design.
+
+\section{Queue Depth Effects}
+Queue depth (the number of outstanding I/O requests simultaneously in flight to a device) interacts differently with different media types. An HDD can service multiple concurrent requests via tagged command queuing (TCQ for PATA, NCQ for SATA/SAS) by reordering them to minimize seek distance --- the classic elevator algorithm. However, HDDs can only genuinely overlap I/O when the operations are on different platters via independent head servicing; in practice, the queue depth benefit is modest.
+
+NVMe SSDs, in contrast, exhibit strong IOPS scaling with queue depth because the FTL can truly parallelize operations across multiple NAND channels and planes. An NVMe SSD might achieve 100,000 IOPS at QD1 but 1,000,000 IOPS at QD128. For workloads that cannot naturally generate high queue depth (many OLTP transactions per second, each with sequential I/O), the SSD may still be underutilized at individual device level. NVMe-oF configurations aggregate many hosts'{} I/O onto shared NVMe devices, naturally generating the queue depth that these devices need to reach peak performance.
+
+\section{Security Considerations}
+\section{Self-Encrypting Drives and the OPAL 2.0 Standard}
+A Self-Encrypting Drive (SED) encrypts all data written to the media using a symmetric key (typically AES-256) that never leaves the drive controller. Encryption is performed in the drive's hardware, in line with the data path, with no performance penalty visible to the host. The drive stores the encryption key in a secure location on the controller firmware, protected by an authentication credential.
+
+Without a valid credential, the drive's data is ciphertext --- the drive presents no readable data to the host. This provides strong protection against physical theft or decommissioning; a drive removed from an authorized system is effectively unreadable.
+
+The TCG OPAL 2.0 specification standardizes the management interface for SEDs. OPAL defines a layered security model:
+
+\begin{itemize}
+  \item • \textbf{Admin SP (Security Provider)}: Manages the overall drive authentication and locking state. Contains the SID (Security Identifier) credential, which is typically set to the MSID (Manufacturing Secure ID) at factory and must be changed on activation.
+  \item \textbf{Locking SP}: Manages locking ranges --- regions of the drive's LBA space that can be independently locked/unlocked. A drive can have multiple locking ranges, each with its own credentials, enabling multi-tenant environments where different partitions belong to different users or applications.
+  \item \textbf{Pre-boot Authentication (PBA)}: For client devices, a small PBA environment boots before the OS from a shadow MBR region. The user authenticates (typically with a passphrase), the PBA sends the credential to the Locking SP to unlock the drive, and then transfers control to the real OS boot loader.
+\end{itemize}
+
+In enterprise server environments, the PBA is typically replaced by integration with key management infrastructure. Wave Systems TCG Embassy, Dell Data Protection Suite, and Microsoft's management of Bitlocker via Active Directory each interface with OPAL-compliant drives. The TCG Opal Feature Set specifies multiple management band operations, single-user mode, and the Admin/User/BandMaster credential hierarchy.
+
+\textbf{Critical deployment consideration}: OPAL drives shipped from manufacturers have their credentials set to the MSID, which is readable without authentication. An OPAL drive that has not been activated and provisioned with a private credential is no more secure than a non-encrypting drive. Organizations must ensure that their provisioning workflow activates the Locking SP and sets credentials before the drive is ever placed in service.
+
+\section{Secure Erase}
+When a storage device is decommissioned, repurposed, or returned to a vendor under warranty, residual data must be sanitized. Three primary approaches exist:
+
+\textbf{ATA Secure Erase (hdparm -\/-security-erase)}: The drive firmware overwrites all user data areas, then all remapped sectors (in the G-list). On an SSD, the firmware issues an erase command to all NAND blocks. This operation typically takes seconds for SSDs and minutes for HDDs. The Enhanced Secure Erase variant overwrites with a vendor-specific pattern. Note that on some drives, particularly consumer SSDs, the ATA Secure Erase command is poorly implemented and may not actually erase all physical media.
+
+\textbf{NVMe Format NVM with Secure Erase}: The NVMe Format NVM command (opcode 80h) with the Secure Erase Settings field set to 1 (User Data Erase) causes the device to erase all user data, or set to 2 (Cryptographic Erase) causes the device to change the internal encryption key, rendering all existing ciphertext unreadable. Cryptographic erase is the fastest and most reliable approach --- changing the key takes milliseconds --- and is the recommended practice for SEDs.
+
+\textbf{Cryptographic Erase}: For any device using full-disk encryption (SED or software), changing or destroying the encryption key renders data permanently unrecoverable without physically recovering the key material. This approach works even for flash media where physical overwrite may not reach all cells (due to wear leveling or spare area). NIST SP 800-88 Guidelines for Media Sanitization formally recognizes cryptographic erase as an acceptable sanitization method when the key strength is sufficient (AES-256 or equivalent).
+
+\textbf{Physical destruction}: For highest-assurance decommissioning, degaussing (ineffective for SSDs, which have no magnetic media) or physical shredding using a certified media destruction service is employed. NSA-approved disintegrators (cross-cut shredders achieving particle sizes of 2mm or smaller) are the standard for classified media destruction.
+
+\section{Firmware Integrity}
+The drive firmware is a privileged code execution environment that operates below the operating system and, in many cases, below the visibility of antivirus or host-based security tools. A compromised drive firmware can intercept, modify, or leak data transparently to all higher layers. The Equation Group malware, exposed by Kaspersky Lab in 2015, demonstrated real-world firmware implants for HDD firmware across multiple major manufacturers.
+
+Defenses against firmware compromise operate at several layers:
+
+\textbf{Secure Boot / Code Signing}: Modern enterprise drives implement code signing for firmware updates. The drive's firmware update process verifies the digital signature of any firmware image before accepting it, using a manufacturer-maintained key. Without a valid signature, the drive will reject the update. This prevents loading custom or malicious firmware images.
+
+\textbf{TPM-Assisted Measurements}: Platforms implementing TCG-compliant measured boot include drive firmware as a measured component. The BIOS or UEFI measures the drive's reported firmware version and adds it to the TPM's Platform Configuration Register (PCR) chain. Any modification to the firmware causes a PCR mismatch, detectable on the next boot cycle.
+
+\textbf{Vendor Verification Programs}: Major enterprise storage vendors (Seagate, Western Digital, Toshiba) maintain secure supply chain programs and offer drive sanitization and integrity verification services for drives returning from the field. Some drives support a vendor-specific secure attestation capability that reports firmware version and configuration cryptographically.
+
+\textbf{Host-based Firmware Scanning}: Tools such as CHIPSEC (Intel's open-source firmware analysis tool) and commercial equivalents can read and analyze drive firmware images for anomalies. This is generally a last-resort investigation technique rather than a preventive control.
+
+The practical guidance for enterprise environments is: use drives only from vendors with documented secure firmware update processes; maintain an approved firmware version list and ensure drives are on current, patched firmware; include drives in the scope of supply chain risk management reviews; and treat any drive that has been outside chain of custody as potentially compromised.

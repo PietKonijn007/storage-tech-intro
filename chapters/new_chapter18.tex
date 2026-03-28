@@ -1,0 +1,631 @@
+\chapter{Storage for AI/ML Workloads}
+\label{ch:18}
+
+Artificial intelligence and machine learning workloads are redefining storage
+architecture requirements in ways that traditional enterprise workload profiles
+did not anticipate. A large language model training run may read hundreds of
+terabytes of text data in randomized mini-batches, write multi-gigabyte
+checkpoints every thirty minutes, and demand sustained throughput that
+saturates multiple 100~GbE links --- all simultaneously, for weeks at a time.
+The storage system that serves this workload must deliver extreme read
+bandwidth, absorb bursty write storms, maintain consistent low latency under
+mixed I/O patterns, and scale capacity to accommodate datasets that routinely
+reach petabyte scale.
+
+The storage requirements of AI/ML are not simply ``faster and bigger'' versions
+of traditional enterprise storage requirements. They are qualitatively
+different in several dimensions: the I/O patterns are unlike database or
+virtualization workloads; the relationship between GPU compute and storage
+throughput creates a new class of bottleneck; the data pipeline spans from raw
+data ingestion through curation, training, checkpointing, and inference
+serving, with each stage imposing distinct storage demands; and emerging
+hardware technologies like GPU-direct storage bypass the CPU entirely,
+requiring storage architectures that can feed data directly into GPU memory
+over RDMA fabrics.
+
+This chapter examines the AI/ML data pipeline end to end, characterizes the
+I/O patterns at each stage, explores the hardware and software technologies
+that address these patterns, reviews validated reference architectures, and
+addresses the governance and security dimensions of AI storage infrastructure.
+
+\section{The AI Data Pipeline}
+
+The AI/ML workflow is best understood as a multi-stage data pipeline, where
+each stage transforms data and imposes distinct storage requirements. The
+canonical pipeline consists of five stages: ingest, curate, train, checkpoint,
+and serve.
+
+\textbf{Ingest} is the process of acquiring raw data from its sources and
+landing it in a storage system accessible to the ML pipeline. Sources vary
+enormously: web crawls producing billions of text documents, medical imaging
+archives containing millions of DICOM files, sensor streams from IoT devices,
+video feeds from surveillance cameras, or structured data exports from
+enterprise databases. Ingest workloads are predominantly write-heavy and
+sequential, and the primary storage requirement is sustained write throughput
+and large capacity. Object storage (S3-compatible systems, StorageGRID, cloud
+object stores) is the natural landing zone for ingested data because of its
+scalability, cost-efficiency, and tolerance for unstructured data formats.
+
+\textbf{Curation} encompasses all data preparation activities: cleaning,
+deduplication, normalization, labeling, augmentation, and format conversion.
+Curation workloads are mixed read/write: they read raw data from the ingest
+tier, transform it, and write curated datasets to a training-ready storage
+tier. Curation is often the most I/O-diverse stage, involving small random
+reads (reading metadata and headers), large sequential reads (reading raw data
+files), and large sequential writes (writing transformed output). Curation
+pipelines frequently use distributed compute frameworks (Apache Spark, Ray,
+Dask) that parallelize I/O across many worker nodes, creating highly
+concurrent access patterns.
+
+\textbf{Training} is the compute-intensive core of the ML pipeline. During
+training, GPUs read data from storage in mini-batches, compute forward and
+backward passes through the model, update model weights, and repeat. Training
+I/O is overwhelmingly read-dominated: the model reads training data
+continuously for hours, days, or weeks, and writes are limited to periodic
+checkpoints and logging. The critical storage metric during training is
+sustained read throughput: the storage system must deliver data to the GPUs
+fast enough that GPUs are not idle waiting for I/O.
+
+\textbf{Checkpointing} is the periodic saving of model state (weights,
+optimizer state, training metadata) to persistent storage. Checkpoints are
+critical for fault tolerance --- in a training run that takes weeks, hardware
+failures are not unlikely, and without checkpoints, a failure would require
+restarting training from scratch. Checkpoint I/O is bursty: large volumes of
+data (tens to hundreds of gigabytes per checkpoint for large models) are
+written in a short burst, then storage is quiet until the next checkpoint
+interval.
+
+\textbf{Serving} (inference) is the deployment of a trained model to process
+new inputs and produce predictions. Inference serving requires loading the
+model from storage into GPU or CPU memory, then processing requests with low
+latency. The storage requirement at serving time is dominated by model loading
+latency --- how quickly the storage system can deliver the model weights to
+the serving infrastructure --- and by the need to manage multiple model
+versions for A/B testing, canary deployments, and rollback.
+
+\section{Training I/O Patterns}
+
+Training I/O deserves detailed examination because it is the stage where
+storage bottlenecks most directly impact the cost of the overall ML workflow.
+A GPU that is idle because the storage system cannot deliver data fast enough
+represents wasted compute capacity --- and at current GPU prices (tens of
+thousands of dollars per GPU per month for cloud instances, millions of
+dollars per DGX system for on-premises deployments), storage-induced GPU idle
+time is extraordinarily expensive.
+
+\subsection{Small Random Reads: Image and NLP Datasets}
+
+Many training workloads, particularly those involving image classification,
+object detection, and natural language processing, access training data as
+many small random reads. An image classification training pipeline might read
+millions of JPEG files, each 100--500~KB in size, in randomized order
+(shuffled across epochs to avoid overfitting). The storage access pattern is
+millions of small random reads per second across a large file namespace.
+
+This access pattern is challenging for storage systems optimized for
+sequential throughput. A parallel file system that delivers 100~GB/s of
+sequential bandwidth may achieve only a fraction of that effective throughput
+when serving millions of random 256~KB reads, because each read incurs
+metadata lookup overhead, potential seek latency (for HDD-backed systems), and
+protocol round-trip latency. The storage system's IOPS capability, metadata
+performance, and ability to handle high concurrency are more critical than raw
+sequential bandwidth for this workload class.
+
+Training frameworks address this challenge partly through data format
+optimization: converting millions of individual files into a smaller number of
+large sequential files (TFRecord for TensorFlow, WebDataset for PyTorch,
+RecordIO for MXNet). These formats concatenate training samples into large
+sequential files with an index, transforming millions of small random reads
+into a smaller number of large sequential reads. The trade-off is that data
+curation pipelines must include the conversion step, and random access to
+individual samples requires consulting the index.
+
+\subsection{Large Sequential Reads: Genomics and Scientific Data}
+
+Genomics, climate modeling, high-energy physics, and other scientific ML
+workloads often train on datasets composed of large files (multi-gigabyte
+FASTQ files, NetCDF arrays, HDF5 datasets) read sequentially. The I/O pattern
+for these workloads is straightforward: sustained large sequential reads at
+maximum bandwidth. The storage bottleneck shifts from IOPS and metadata
+performance to raw throughput: the storage system must deliver data at a rate
+that matches or exceeds the GPUs' consumption rate.
+
+For these workloads, the critical metric is aggregate read bandwidth. A DGX
+H100 system with eight H100 GPUs can consume training data at rates exceeding
+100~GB/s when the model's data loading pipeline is optimized. Saturating this
+demand requires a storage system capable of delivering 100+~GB/s of sustained
+read throughput to a single compute node, which in practice means a
+high-performance parallel file system (BeeGFS, Lustre, GPFS/Spectrum Scale,
+WekaFS) served over a high-bandwidth network fabric (InfiniBand HDR/NDR or
+100/200/400~GbE RoCE).
+
+\subsection{Why Training Is Read-Heavy but Bursty}
+
+The aggregate read/write ratio during training is heavily skewed toward reads
+--- typically 95\% reads or higher. The training loop reads each sample in the
+dataset once per epoch (a complete pass through the dataset), and modern
+training runs perform dozens to hundreds of epochs. The only writes during
+training are checkpoint saves, logging, and occasional intermediate outputs.
+
+However, the read pattern is not uniform. Data loading pipelines use
+prefetching and buffering to stage data in host memory (or GPU memory) ahead
+of the training computation. When the prefetch buffer is full, reads pause;
+when the buffer is consumed, reads resume at maximum rate. This creates a
+bursty read pattern at the storage level, with alternating periods of maximum
+bandwidth consumption and relative quiet. Storage systems must be sized for
+the peak read rate, not the average, because any period where the storage
+system cannot keep up with the GPU's data consumption rate causes GPU idle
+time.
+
+\section{Checkpoint I/O}
+
+Checkpointing is the insurance policy of model training. A single checkpoint
+of a large language model captures the complete state needed to resume
+training: model weights, optimizer state (momentum, adaptive learning rate
+parameters), learning rate scheduler state, random number generator state, and
+the current position in the training data. For large models, this state can be
+substantial: a model with 70 billion parameters in mixed precision (FP16/BF16
+weights plus FP32 optimizer state) produces checkpoints of approximately
+500~GB to 1~TB.
+
+Checkpoint writes are bursty and synchronous: all GPUs in the training cluster
+pause computation, write their portion of the model state to storage, and wait
+for the write to complete before resuming training. The checkpoint duration is
+pure overhead --- no useful training computation occurs during the checkpoint
+write. For a 500~GB checkpoint written to a storage system delivering
+20~GB/s write throughput, the checkpoint takes approximately 25 seconds. If
+checkpoints occur every 30 minutes, this represents roughly 1.4\% overhead.
+But if the storage system delivers only 5~GB/s write throughput, the
+checkpoint takes 100 seconds --- 5.5\% overhead --- and the cumulative cost
+over a multi-week training run is significant.
+
+The checkpoint cadence involves a fundamental trade-off: more frequent
+checkpoints reduce the amount of training work lost to a failure (lower
+recovery cost) but increase the aggregate time spent checkpointing (higher
+overhead). Typical cadences range from every 15 minutes for critical training
+runs to every few hours for less expensive experiments. The storage system
+must be sized to absorb the peak write burst at the chosen cadence without
+causing unacceptable training pause duration.
+
+Asynchronous checkpointing techniques mitigate the overhead by allowing
+training to resume before the checkpoint write is fully committed to
+persistent storage. The checkpoint data is first written to a fast local
+staging buffer (NVMe SSDs on the compute nodes or a high-speed burst buffer),
+and then flushed to persistent storage in the background while training
+continues. This decouples checkpoint latency from persistent storage write
+throughput, at the cost of increased local storage requirements and the risk
+that a failure during the background flush could lose the most recent
+checkpoint.
+
+\section{GPU-Direct Storage}
+
+GPU-direct storage (GDS), part of NVIDIA's Magnum IO suite, is a technology
+that enables direct memory access (DMA) transfers between storage devices and
+GPU memory, bypassing the CPU and system memory entirely. In traditional I/O
+paths, data read from storage (NVMe SSDs or network storage via NFS/iSCSI) is
+first transferred to system memory (host DRAM) by the CPU, and then copied
+from system memory to GPU memory over the PCIe bus. This double-copy path
+consumes CPU cycles, consumes system memory bandwidth, and adds latency.
+
+\subsection{Bypassing the CPU: DMA from Storage to GPU}
+
+GDS eliminates the intermediate copy by establishing a direct DMA path from
+the storage device (or network adapter, for remote storage) to the GPU's
+memory. When an application requests a read using the cuFile API (the GDS
+programming interface), the storage device transfers data directly into a GPU
+memory buffer without staging it in system memory. This eliminates the
+``bounce buffer'' --- the system memory allocation used as an intermediate
+staging area in the traditional path --- and frees the CPU and system memory
+bus for other work.
+
+The cuFile API provides POSIX-like read/write semantics (cuFileRead,
+cuFileWrite) that operate on GPU memory buffers (CUDA device pointers) rather
+than host memory buffers. Applications that already use CUDA for GPU
+computation can adopt cuFile with relatively modest code changes: replacing
+standard file I/O calls with cuFile equivalents and ensuring that target
+buffers are allocated in GPU memory.
+
+\subsection{Performance Implications}
+
+The performance benefit of GDS is most pronounced for workloads that are
+I/O-bound and transfer large volumes of data between storage and GPU. For
+training data loading, GDS can reduce data loading latency by 30--60\%
+compared to the traditional bounce-buffer path, depending on the I/O size and
+storage backend. For checkpoint writes, GDS enables direct transfer of
+GPU-resident model state to storage without first copying to host memory,
+reducing checkpoint duration.
+
+GDS requires support from both the storage layer and the GPU software stack.
+On the storage side, GDS works with local NVMe SSDs (using the NVMe driver's
+GDS support), NFS (using the NFS-over-RDMA protocol with GDS-capable NFS
+clients), and parallel file systems that implement GDS-compatible I/O paths.
+On the GPU side, GDS requires NVIDIA GPUs with CUDA 11.4 or later, the cuFile
+library, and a GDS-compatible operating system configuration (including
+appropriate IOMMU and DMA mapping settings).
+
+The effective throughput improvement from GDS depends heavily on the workload
+characteristics. For large I/O operations (1~MB and above), GDS provides the
+most significant benefit because the overhead of the bounce buffer copy is
+proportionally larger relative to the total transfer time. For very small I/O
+operations, the DMA setup overhead may offset the benefit of eliminating the
+bounce buffer. In practice, most AI training workloads involve sufficiently
+large I/O operations to benefit substantially from GDS.
+
+\section{NVIDIA DGX SuperPOD Reference Architectures}
+
+NVIDIA DGX SuperPOD is a reference architecture for large-scale AI training
+infrastructure, combining multiple DGX systems into a unified compute cluster
+with high-bandwidth interconnect and shared storage. NetApp is one of NVIDIA's
+validated storage partners for DGX SuperPOD deployments, providing the storage
+tier for training data, checkpoints, and model artifacts.
+
+\subsection{DGX H100 and B200 Systems}
+
+The NVIDIA DGX H100 system contains eight H100 GPUs interconnected by NVLink,
+providing 3.2~Tbps of GPU-to-GPU bandwidth within a single node. Each DGX
+H100 provides approximately 32 petaFLOPS of AI training compute (FP8
+precision). A DGX SuperPOD aggregates multiple DGX H100 systems --- typically
+20 to 32 nodes for a single ``scalable unit'' --- into a cluster
+interconnected by InfiniBand NDR (400~Gbps per port) or, in newer
+configurations, by 400~GbE RoCE fabric.
+
+The NVIDIA DGX B200 system, based on the Blackwell GPU architecture, provides
+substantially higher compute density per node. Each DGX B200 contains eight
+B200 GPUs, and the per-node training compute scales correspondingly. The
+storage I/O demands scale with compute: faster GPUs consume training data
+faster, produce larger checkpoints (as model sizes enabled by the additional
+compute grow), and demand higher sustained storage throughput.
+
+\subsection{Network Fabric}
+
+The network fabric in a DGX SuperPOD is purpose-built for AI training
+workloads. InfiniBand NDR provides 400~Gbps per port with RDMA semantics,
+enabling GPU-to-GPU communication (for distributed training allreduce
+operations) and GPU-to-storage communication (for GDS-enabled data loading)
+with minimal CPU involvement and ultra-low latency.
+
+For environments that prefer Ethernet-based fabrics, RoCE v2 (RDMA over
+Converged Ethernet) over 100/200/400~GbE provides comparable RDMA semantics
+with standard Ethernet switching infrastructure. The choice between
+InfiniBand and RoCE involves trade-offs in congestion management, fabric
+management complexity, and ecosystem compatibility, but both fabrics deliver
+the RDMA transport required for efficient GPU-direct storage operations.
+
+\subsection{Storage Tier: BeeGFS on NetApp and ONTAP AI}
+
+The storage tier in a DGX SuperPOD must deliver sustained throughput
+sufficient to keep all GPUs fed with training data and absorb checkpoint write
+bursts without causing training stalls. For a 32-node DGX H100 SuperPOD with
+256 GPUs, the aggregate storage throughput requirement can exceed 500~GB/s for
+data-intensive training workloads.
+
+BeeGFS on NetApp EF-series or E-series storage is one of the validated storage
+architectures for DGX SuperPOD. BeeGFS is a parallel file system that stripes
+data across multiple storage servers, providing aggregate throughput that
+scales linearly with the number of storage servers. BeeGFS on NetApp pairs the
+BeeGFS parallel file system software with NetApp's high-density,
+high-throughput block storage arrays, providing a purpose-built storage
+solution for AI training.
+
+NetApp ONTAP AI is an alternative validated architecture that pairs NetApp AFF
+all-flash arrays with DGX systems, using NFS as the data access protocol.
+ONTAP AI leverages ONTAP's data management capabilities --- snapshots,
+cloning, replication, tiering --- alongside the high throughput of AFF
+A-series arrays to provide a storage solution that combines AI training
+performance with enterprise data management.
+
+\section{ONTAP AI: Validated Architecture for AI Workloads}
+
+ONTAP AI is NetApp's validated design for AI and deep learning workloads,
+pairing NetApp AFF all-flash arrays with NVIDIA DGX systems. The architecture
+is validated through joint testing by NetApp and NVIDIA, with published design
+guides that specify hardware configurations, network topologies, software
+versions, and performance benchmarks.
+
+\subsection{AFF A-Series and DGX Integration}
+
+The ONTAP AI architecture connects NetApp AFF A-series arrays (AFF A900, AFF
+A800, or AFF A70/A90) to DGX systems over a dedicated high-bandwidth network.
+The AFF arrays serve training data via NFS, which provides a POSIX-compatible
+file interface that is natively supported by all major ML frameworks
+(TensorFlow, PyTorch, JAX) without requiring custom storage drivers or
+client-side software.
+
+NFS over RDMA (NFS/RDMA) is supported in ONTAP AI configurations, enabling
+GDS-compatible data paths from the AFF array directly to GPU memory. This
+combination --- AFF delivering high-throughput NFS with RDMA transport, DGX
+systems consuming data via GDS-enabled cuFile reads --- provides an end-to-end
+optimized data path that minimizes latency and maximizes effective throughput.
+
+\subsection{NFS for Training Data: Performance Tuning}
+
+Achieving maximum NFS throughput for AI training requires careful tuning of
+multiple parameters. The NFS mount options (rsize/wsize set to the maximum
+supported value, typically 1~MB; nconnect to establish multiple TCP connections
+per mount point; actimeo for attribute caching) significantly impact
+throughput. ONTAP export policies should be configured to allow the DGX nodes
+full read/write access with root squash disabled (the training process
+typically runs as root inside containers). Network MTU should be set to 9000
+(jumbo frames) on all interfaces in the data path to reduce per-packet
+overhead.
+
+On the ONTAP side, volumes serving training data should be configured with
+appropriate QoS policies to ensure that training I/O is not impacted by other
+workloads on the same cluster. FlexGroup volumes --- ONTAP's scale-out volume
+type that distributes data across all nodes in the cluster --- are recommended
+for training datasets because they aggregate the throughput of all cluster
+nodes into a single namespace, simplifying data management while maximizing
+performance.
+
+Data layout on the FlexGroup volume matters for training throughput. Large
+training datasets should be ingested in a manner that distributes data evenly
+across all constituent member volumes of the FlexGroup. Uneven distribution
+can create hotspots where a subset of cluster nodes handles a disproportionate
+share of the training I/O, limiting aggregate throughput. ONTAP's automatic
+member selection during file creation generally provides good distribution,
+but for very large files or highly skewed file size distributions, manual
+placement guidance may be necessary.
+
+\section{Data Caching for Training}
+
+Data loading is frequently the bottleneck in the AI training pipeline. Even
+with high-throughput storage systems, the data loading pipeline --- which
+includes reading data from storage, decoding (decompressing images, parsing
+text), and applying augmentation transforms --- can become the limiting factor
+if not carefully optimized.
+
+NVIDIA DALI (Data Loading Library) is a GPU-accelerated data loading and
+preprocessing pipeline that offloads data decoding and augmentation from the
+CPU to the GPU. DALI reads data from storage into GPU memory, performs image
+decoding, resizing, cropping, and normalization on the GPU, and feeds the
+processed data directly into the training pipeline. By shifting preprocessing
+to the GPU, DALI reduces the demand on CPU cores and system memory, and can
+improve training throughput for data-loading-bound workloads by 2--4x.
+
+PyTorch's data loading framework supports CachedDataset implementations that
+cache decoded training samples in local memory (host DRAM or local NVMe)
+after first access, eliminating repeated storage reads for datasets that are
+accessed multiple times (across epochs). For datasets that fit in aggregate
+host memory across the training cluster, this approach effectively eliminates
+storage I/O after the first epoch. For datasets that exceed host memory,
+tiered caching strategies --- hot samples in GPU memory, warm samples in host
+DRAM, cold samples on local NVMe, origin data on network storage --- provide a
+hierarchy that balances cache hit rate against available capacity.
+
+WekaFS (Weka Data Platform) implements a distributed, tiered file system that
+automatically stages hot data on NVMe SSDs close to compute while tiering
+cold data to object storage. For AI training, WekaFS provides a
+high-performance file system layer that combines the throughput of local NVMe
+with the capacity of cloud or on-premises object storage, with transparent
+data movement between tiers based on access patterns.
+
+\section{Inference Serving Storage Requirements}
+
+Inference serving has fundamentally different storage requirements from
+training. Training is a long-running batch process that consumes data
+continuously; inference is a request-response service that must load models
+and serve predictions with low latency.
+
+\subsection{Model Loading Latency}
+
+The first storage-related concern for inference serving is model loading
+latency: the time required to read a model's weights from storage into GPU (or
+CPU) memory before the serving instance can begin processing requests. For a
+large language model with 70 billion parameters in FP16, the model weights
+alone occupy approximately 140~GB. Loading 140~GB from network storage at
+10~GB/s takes 14 seconds; at 1~GB/s, it takes 140 seconds --- over two
+minutes of cold-start latency during which the serving instance cannot process
+requests.
+
+Cold-start latency is particularly problematic for serverless or autoscaling
+inference deployments, where new serving instances are started on demand in
+response to traffic spikes. If each new instance requires two minutes to load
+the model before serving, the autoscaling response is too slow for
+latency-sensitive applications. Solutions include model pre-loading (keeping
+warm instances with models already loaded), model caching on local NVMe SSDs
+(so that subsequent loads read from local flash rather than network storage),
+and model sharding across multiple GPUs (each GPU loads only its shard,
+reducing per-GPU load time).
+
+For production inference deployments, the storage architecture should
+prioritize read throughput and read latency for model loading operations.
+Local NVMe caching on inference nodes, combined with background model staging
+from network storage, provides the best balance of fast startup and efficient
+capacity utilization. The network storage tier (ONTAP NFS, S3) serves as the
+authoritative model repository, while local NVMe acts as a high-speed read
+cache.
+
+\subsection{Model Versioning and A/B Testing}
+
+Production ML systems typically maintain multiple model versions
+simultaneously: the current production model, a candidate model being A/B
+tested, a previous model for rollback, and potentially several experimental
+variants. Each version is a complete set of model weights, often hundreds of
+gigabytes in size. The storage system must efficiently manage these versions
+without excessive capacity consumption.
+
+ONTAP's Snapshot and FlexClone capabilities are well-suited for model
+versioning. A Snapshot of a volume containing the production model preserves
+the model state at a point in time with zero additional capacity (until the
+data diverges). FlexClone creates a writable clone of the model volume that
+initially shares all blocks with the parent; only blocks that are subsequently
+modified consume additional capacity. This enables efficient maintenance of
+multiple model versions: each version is a FlexClone or Snapshot of a base
+model volume, consuming only the delta capacity for blocks that differ between
+versions.
+
+The A/B testing pattern is straightforward with this approach: the production
+model serves from the primary volume, the candidate model is loaded from a
+FlexClone, and traffic is split between them according to the A/B test
+configuration. If the candidate model performs well, it becomes the new
+production model; if not, the FlexClone is deleted and the test is repeated
+with a new candidate. The storage overhead of maintaining the A/B test
+infrastructure is minimal because FlexClone's block sharing means the
+candidate volume consumes only the capacity of the blocks that differ from the
+production model --- typically zero for identical model architectures with
+different trained weights, since the weight tensors themselves are the changed
+blocks.
+
+\section{StorageGRID for Dataset Lakes}
+
+Large-scale AI datasets --- web crawls, image repositories, genomics
+databases, sensor archives --- are often stored as unstructured data in object
+storage systems. NetApp StorageGRID provides S3-compatible on-premises object
+storage that serves as the dataset lake for AI/ML pipelines.
+
+StorageGRID's S3 compatibility means that ML frameworks and data processing
+tools that support S3 (virtually all modern ML tooling) can access StorageGRID
+datasets without modification. PyTorch's built-in S3 dataset support, Apache
+Spark's S3A connector, and Ray's object store integration all work with
+StorageGRID, enabling seamless integration into existing ML data pipelines.
+
+For AI workloads, StorageGRID's information lifecycle management (ILM)
+capabilities enable automated data management policies: newly ingested raw
+data can be stored with high durability (multiple replicas or erasure coding
+across sites), curated training datasets can be stored with
+performance-optimized placement (local replicas near the training cluster),
+and archived models or datasets can be tiered to lower-cost storage tiers. The
+ILM engine operates on object metadata, enabling policy-driven lifecycle
+management based on dataset type, age, project affiliation, or any custom
+metadata tag applied during ingestion.
+
+\section{Data Pipelines: Spark, Ray, and Dask}
+
+AI/ML data pipelines frequently rely on distributed compute frameworks for
+data curation, feature engineering, and preprocessing. These frameworks
+interact with storage systems in patterns that are distinct from direct
+training I/O and deserve separate consideration.
+
+Apache Spark reads input data from storage (typically object storage or HDFS),
+distributes it across executor processes, performs transformations (filtering,
+joining, aggregating, featurizing), and writes results back to storage.
+Spark's I/O pattern is characterized by large sequential reads during the
+input phase, substantial shuffle I/O (intermediate data exchanged between
+executors during wide transformations), and large sequential writes during the
+output phase. The storage system must provide sufficient read and write
+throughput to prevent Spark stages from becoming I/O-bound, and the
+intermediate shuffle storage (local SSDs on Spark executors) must be sized for
+the shuffle data volume.
+
+Ray is a distributed compute framework increasingly used for ML workloads,
+including distributed training, hyperparameter tuning, and reinforcement
+learning. Ray's object store provides shared-memory access to objects across
+workers, and Ray's data library (Ray Data) provides streaming data loading
+from storage. Ray Data reads data in streaming fashion, minimizing memory
+requirements for large datasets, but it requires consistent storage throughput
+to maintain pipeline throughput without stalls.
+
+Dask provides parallel computing in Python and is frequently used for
+preprocessing large tabular or array datasets. Dask reads data in partitions
+from storage (Parquet files from S3, HDF5 from NFS, CSV from file systems)
+and processes partitions in parallel across workers. Like Spark, Dask's I/O
+pattern involves parallel reads of data partitions, in-memory computation, and
+parallel writes of results.
+
+For all three frameworks, the storage architecture must provide sufficient
+aggregate throughput to prevent I/O from becoming the bottleneck. NFS-based
+storage (ONTAP AFF with FlexGroup volumes) and S3-compatible object storage
+(StorageGRID) are both viable backends, with the choice depending on the data
+format, access pattern, and integration requirements of the specific pipeline.
+
+\begin{securitybox}[Security \& Governance: AI/ML Storage Infrastructure]
+
+\textbf{Training Data Governance and Provenance.}
+The quality and provenance of training data directly determine the quality and
+reliability of the resulting model. Provenance tracking --- recording the
+origin, transformation history, and lineage of every dataset used in training
+--- is essential for reproducibility, auditability, and regulatory compliance.
+The EU AI Act imposes specific requirements on providers of high-risk AI
+systems to maintain documentation of training data, including data sources,
+preprocessing steps, labeling methodology, and quality metrics. Storage
+systems must preserve provenance metadata alongside the data itself, and the
+metadata must be immutable to prevent post-hoc alteration of the training
+record.
+
+ONTAP's audit logging and SnapLock capabilities provide the technical
+foundation for provenance tracking: audit logs record every data access
+operation, and SnapLock can enforce WORM (write once, read many) retention on
+provenance metadata files, ensuring that the record of data lineage cannot be
+modified or deleted during the retention period.
+
+\textbf{PII in Training Data.}
+Training datasets, particularly those derived from web crawls, enterprise
+databases, or customer interactions, frequently contain personally
+identifiable information. GDPR, CCPA, and other privacy regulations restrict
+the use of personal data for purposes beyond the original collection purpose,
+and training an AI model on personal data may constitute a new processing
+purpose requiring a distinct legal basis. BlueXP classification should be
+integrated into the data curation pipeline to scan datasets for PII before
+they enter the training workflow. Datasets containing PII that has not been
+anonymized or pseudonymized should be flagged and routed through a privacy
+review process before training proceeds.
+
+\textbf{Model and Checkpoint Protection.}
+Trained models represent significant intellectual property and competitive
+advantage. Unauthorized access to model weights enables model theft,
+adversarial attack development, and competitive intelligence extraction.
+Storage-level protection for models and checkpoints should include: encryption
+at rest using AES-256 with customer-managed keys; access control enforcing
+least privilege (only the training and serving pipelines should have read
+access to model files; only the training pipeline should have write access);
+immutable snapshots of final trained models to prevent tampering; and audit
+logging of all access to model files for post-incident investigation.
+
+\textbf{GPU-Direct Storage Security Considerations.}
+GDS bypasses the CPU and operating system's I/O stack, which means that
+traditional OS-level security controls (file permission checks, SELinux
+mandatory access control, seccomp filters) are not in the DMA data path. Data
+transferred via GDS flows directly from the storage device or network adapter
+to GPU memory without the CPU inspecting or mediating the transfer. This has
+security implications: a compromised GPU process could potentially use GDS to
+read arbitrary data from storage devices that are configured for DMA access,
+bypassing OS-level access controls.
+
+Mitigations include: restricting GDS configuration to dedicated AI training
+nodes that do not run untrusted workloads; using IOMMU (Intel VT-d, AMD-Vi)
+to restrict DMA mappings to specific PCI devices and memory regions; ensuring
+that the storage system's export/share permissions enforce access control at
+the storage layer (NFS export policies, ONTAP RBAC) rather than relying
+solely on OS-level controls on the compute node; and monitoring GDS-related
+DMA activity through hardware performance counters and storage-side audit
+logs.
+
+RDMA fabric security deserves equal attention. RDMA enables remote memory
+access without CPU involvement, which means that a compromised node on an
+RDMA-capable fabric could potentially read memory from other nodes.
+InfiniBand partitioning (P\_Keys) and RoCE VLAN segmentation provide
+network-level isolation; these should be configured to segregate AI training
+traffic from other network traffic and to restrict RDMA access to authorized
+compute and storage nodes.
+
+\textbf{AI in Regulated Industries.}
+AI systems deployed in regulated industries face additional storage
+requirements. FDA Software as a Medical Device (SaMD) guidelines require
+complete traceability of training data, model development, and validation
+datasets. HIPAA requires that any AI system processing protected health
+information maintains the same privacy and security controls as other
+PHI-processing systems, including encryption, access controls, and audit
+logging. Financial services regulators require model explainability and
+auditability, which depends on the availability and integrity of training data
+and model artifacts. In all cases, the storage infrastructure must provide the
+data integrity, immutability, and audit trail capabilities that regulatory
+frameworks demand.
+
+\textbf{Data Poisoning Prevention.}
+Data poisoning attacks involve injecting malicious samples into training
+datasets to manipulate model behavior --- for example, adding subtly modified
+images to a training set to cause a model to misclassify specific inputs. The
+storage-level defense against data poisoning is to ensure the integrity of
+training datasets once they are validated and approved for training. SnapLock
+WORM protection on training dataset volumes prevents any modification to the
+dataset after it is locked, including modification by privileged users or
+compromised accounts. Snapshot-based versioning provides a verifiable record
+of the dataset state at the time training began, enabling post-incident
+verification that the training data was not tampered with.
+
+Complementary measures include cryptographic hashing of training datasets
+(storing SHA-256 hashes of dataset files in a tamper-proof ledger) and access
+control policies that restrict write access to training dataset volumes to the
+data curation pipeline alone, with all write operations logged and auditable.
+
+\end{securitybox}

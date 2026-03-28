@@ -1,0 +1,815 @@
+% =============================================================================
+% Appendix B — Glossary
+% =============================================================================
+\chapter{Glossary}\label{app:glossary}
+
+This glossary defines the key terms, acronyms, and technologies referenced
+throughout this book. Entries are grouped alphabetically. Cross-references to
+related terms appear in \textit{italics}.
+
+%% ---------------------------------------------------------------------------
+\section*{A}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{ACL (Access Control List)}]
+A fine-grained permission mechanism that extends traditional UNIX
+owner/group/other modes. POSIX ACLs attach per-user or per-group entries to
+individual files or directories. NFSv4 ACLs provide richer semantics
+including inheritance and deny rules.
+
+\item[\textbf{AFF (All Flash FAS)}]
+NetApp hardware platform built exclusively with solid-state drives. AFF
+systems run \textit{ONTAP} and are optimised for low-latency, high-IOPS
+workloads such as databases and virtualised environments.
+
+\item[\textbf{ALUA (Asymmetric Logical Unit Access)}]
+A SCSI standard that allows a storage array to advertise preferred and
+non-preferred paths to a \textit{LUN}. The host multipath driver uses this
+information to route I/O through the optimal controller.
+
+\item[\textbf{ANA (Asymmetric Namespace Access)}]
+The NVMe equivalent of \textit{ALUA}. ANA enables multipath-aware hosts to
+identify the optimal controller for a given NVMe namespace.
+
+\item[\textbf{ARC (Adaptive Replacement Cache)}]
+The primary read cache in \textit{ZFS}, held in RAM. ARC uses a
+frequency-and-recency algorithm to keep hot blocks cached. It dynamically
+grows and shrinks in response to system memory pressure.
+
+\item[\textbf{ARP (Address Resolution Protocol)}]
+A Layer-2 protocol that resolves IPv4 addresses to MAC addresses on a local
+network segment. Relevant to storage networking when iSCSI or NFS traffic
+traverses Ethernet.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{B}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{BBU (Battery Backup Unit)}]
+A battery module attached to a RAID controller or NVRAM card that protects
+in-flight write data during a power failure, enabling the controller to
+safely use a write-back cache policy.
+
+\item[\textbf{BFQ (Budget Fair Queuing)}]
+A Linux I/O scheduler designed for interactive and latency-sensitive
+workloads. BFQ allocates per-process I/O budgets to provide fairness and
+low latency, particularly on rotational media.
+
+\item[\textbf{BlueXP}]
+NetApp's unified control plane for managing hybrid and multi-cloud storage
+environments. BlueXP provides discovery, provisioning, data protection, and
+governance across on-premises ONTAP, \textit{CVO}, \textit{FSx for ONTAP},
+\textit{GCNV}, and \textit{StorageGRID} deployments.
+
+\item[\textbf{Btrfs (B-tree Filesystem)}]
+A Linux copy-on-write filesystem supporting integrated volume management,
+snapshots, checksumming, compression, and multi-device spanning. Btrfs aims
+to be a general-purpose next-generation filesystem for Linux.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{C}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{CAP Theorem}]
+A distributed systems principle stating that a networked data store can
+simultaneously guarantee at most two of: Consistency, Availability, and
+Partition tolerance. Storage architects use it to reason about trade-offs
+in distributed and replicated systems.
+
+\item[\textbf{CBT (Changed Block Tracking)}]
+A mechanism that records which disk blocks have changed since a previous
+point in time. CBT accelerates incremental backup and replication by
+allowing the backup engine to read only modified blocks.
+
+\item[\textbf{CDM (Copy Data Management)}]
+A strategy and toolset for reducing the proliferation of redundant data
+copies (development, test, analytics) by using space-efficient clones and
+snapshots instead of full physical copies.
+
+\item[\textbf{CephFS}]
+The POSIX-compliant distributed filesystem built on top of the \textit{RADOS}
+object store in Ceph. CephFS uses one or more Metadata Servers
+(\textit{MDS}) to manage the namespace and delegates data storage to
+\textit{OSDs}.
+
+\item[\textbf{CHAP (Challenge-Handshake Authentication Protocol)}]
+An authentication scheme used in \textit{iSCSI} to verify the identity of
+initiators and targets. Mutual CHAP authenticates both sides of the
+connection.
+
+\item[\textbf{CIFS (Common Internet File System)}]
+The original name for the SMB file-sharing protocol as extended by
+Microsoft. Modern implementations use \textit{SMB} 2.x/3.x, but the term
+CIFS persists in Linux mount helpers (\texttt{mount.cifs}).
+
+\item[\textbf{Cloud Volumes ONTAP (CVO)}]
+A software-defined storage instance that runs the NetApp \textit{ONTAP}
+operating system on public cloud infrastructure (AWS, Azure, GCP). CVO
+provides enterprise data services---snapshots, replication, tiering---in the
+cloud.
+
+\item[\textbf{CoW (Copy-on-Write)}]
+A technique where data blocks are never overwritten in place. Instead, a
+modified copy is written to a new location and the metadata pointer is
+atomically updated. Used by \textit{ZFS}, \textit{Btrfs}, and
+\textit{WAFL}.
+
+\item[\textbf{CRUSH (Controlled Replication Under Scalable Hashing)}]
+The deterministic data placement algorithm in \textit{Ceph}. CRUSH maps
+objects to \textit{OSDs} based on a hierarchical cluster map without
+requiring a central lookup table.
+
+\item[\textbf{CSI (Container Storage Interface)}]
+A standard API that allows Kubernetes and other container orchestrators to
+provision, attach, mount, snapshot, and resize persistent storage volumes
+from any compliant driver. See also \textit{Trident}.
+
+\item[\textbf{CVO}]
+See \textit{Cloud Volumes ONTAP}.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{D}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{DAID (Data-At-Rest Encryption Identifier)}]
+An identifier associated with a self-encrypting drive's encryption domain,
+used when managing keys for \textit{SED} and \textit{NSE} devices within a
+storage system.
+
+\item[\textbf{DM-Multipath}]
+The Linux device-mapper multipath framework. DM-Multipath aggregates
+multiple physical paths between a host and a storage device into a single
+logical device, providing redundancy and optional load balancing.
+
+\item[\textbf{DORA (Discover, Offer, Request, Acknowledge)}]
+The four-step handshake in DHCP used to assign IP addresses. In storage
+contexts, DORA is relevant to iSCSI boot and PXE environments where
+initiators obtain their network identity via DHCP.
+
+\item[\textbf{dRAID (Distributed RAID)}]
+A \textit{ZFS} pool topology that distributes parity and spare capacity
+across all drives in a group, dramatically accelerating rebuild times
+compared to traditional RAID-Z by parallelising reconstruction I/O.
+
+\item[\textbf{DRBD (Distributed Replicated Block Device)}]
+A Linux kernel module that mirrors block devices in real time over a
+network. DRBD is often called ``network RAID-1'' and is used for
+high-availability clustering.
+
+\item[\textbf{DWPD (Drive Writes Per Day)}]
+An SSD endurance metric expressing how many times the entire drive capacity
+can be overwritten per day over the warranty period before wear-out. See
+also \textit{TBW}.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{E}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{Erasure Coding}]
+A data protection scheme that splits an object into $k$ data fragments and
+computes $m$ parity (coding) fragments such that any $k$ of the $k+m$
+fragments suffice to reconstruct the original data. More space-efficient
+than replication for cold and warm data.
+
+\item[\textbf{ext4 (Fourth Extended Filesystem)}]
+The mature, stable default filesystem on many Linux distributions.\ ext4
+supports volumes up to 1\,EiB, extents-based allocation, delayed
+allocation, and journaling.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{F}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{FabricPool}]
+A NetApp \textit{ONTAP} feature that automatically tiers cold data blocks
+from a high-performance local tier (SSD aggregate) to a low-cost object
+store (S3, Azure Blob, Google Cloud Storage, or \textit{StorageGRID}).
+
+\item[\textbf{FAS (Fabric-Attached Storage)}]
+NetApp's hybrid (HDD\,+\,SSD) storage platform running \textit{ONTAP}.
+FAS systems support both \textit{SAN} and \textit{NAS} protocols.
+
+\item[\textbf{FC (Fibre Channel)}]
+A high-speed serial transport protocol designed for storage networking.\ FC
+provides lossless, in-order delivery and is the traditional backbone of
+enterprise \textit{SAN} environments. Common speeds include 32\,Gbps and
+64\,Gbps.
+
+\item[\textbf{FlexCache}]
+An ONTAP feature that creates a sparse, read-write caching volume at a
+remote site, reducing latency for frequently accessed data from a distant
+origin \textit{FlexVol} or \textit{FlexGroup}.
+
+\item[\textbf{FlexClone}]
+A NetApp technology that creates writable, space-efficient clones of
+\textit{FlexVol} volumes or LUNs using shared block pointers. Only changed
+blocks consume additional space.
+
+\item[\textbf{FlexGroup}]
+An ONTAP scale-out NAS container that distributes a single namespace across
+multiple constituent \textit{FlexVol} volumes and nodes, delivering high
+throughput and large capacity for unstructured data workloads.
+
+\item[\textbf{FlexVol}]
+The fundamental logical volume in \textit{ONTAP}. A FlexVol resides within
+an aggregate and can host NFS exports, CIFS shares, or \textit{LUNs}.
+
+\item[\textbf{FLOGI (Fabric Login)}]
+The initial Fibre Channel login process in which a node registers with the
+fabric switch and obtains an N\_Port ID.\ FLOGI is analogous to DHCP in IP
+networking.
+
+\item[\textbf{FPolicy}]
+An ONTAP file-access notification framework that intercepts file operations
+(open, create, rename, delete) and forwards events to an external server
+for real-time screening, auditing, or data classification.
+
+\item[\textbf{FSx for ONTAP}]
+A fully managed AWS service that provides NetApp \textit{ONTAP} file systems
+in the cloud. FSx for ONTAP supports NFS, SMB, and iSCSI with features
+such as snapshots, \textit{FlexClone}, and \textit{SnapMirror}.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{G}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{GCNV (Google Cloud NetApp Volumes)}]
+A Google Cloud--native service built on NetApp \textit{ONTAP} technology that
+delivers fully managed NFS and SMB file storage with enterprise data
+services.
+
+\item[\textbf{GDPR (General Data Protection Regulation)}]
+European Union regulation governing the processing and storage of personal
+data. GDPR mandates data minimisation, retention limits, and the right to
+erasure---all of which have direct implications for storage architecture
+and lifecycle management.
+
+\item[\textbf{GDS (GPUDirect Storage)}]
+See \textit{GPUDirect Storage}.
+
+\item[\textbf{GFS2 (Global File System 2)}]
+A shared-disk cluster filesystem for Linux that uses distributed locking
+(\texttt{dlm}) to allow multiple nodes to mount and write to the same
+block device concurrently.
+
+\item[\textbf{GPFS (General Parallel File System)}]
+IBM's high-performance parallel filesystem (now marketed as IBM Storage
+Scale). GPFS stripes data across many disks and servers and is widely
+deployed in HPC and AI environments.
+
+\item[\textbf{GPUDirect Storage}]
+An NVIDIA technology that enables a direct data path between storage and GPU
+memory, bypassing the CPU and system memory entirely. GPUDirect Storage
+reduces latency and CPU overhead for AI/ML training and inference
+pipelines.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{H}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{HBA (Host Bus Adapter)}]
+A hardware interface card that connects a host to a storage network.\ FC
+HBAs connect servers to Fibre Channel SANs; iSCSI HBAs (or TOE cards)
+offload TCP/IP processing for IP-based SANs.
+
+\item[\textbf{HCI (Hyper-Converged Infrastructure)}]
+An architecture that combines compute, storage, and networking into a single
+appliance or software stack, managed as a unified platform. Examples
+include VMware vSAN, Nutanix, and Azure Stack HCI.
+
+\item[\textbf{HSM (Hierarchical Storage Management)}]
+A policy-driven system that automatically migrates data between storage
+tiers (e.g., SSD to HDD to tape or cloud) based on access frequency,
+age, or other criteria.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{I}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{IOPS (Input/Output Operations Per Second)}]
+The primary throughput metric for storage devices handling small-block
+random workloads. IOPS must always be qualified by block size, read/write
+mix, and queue depth to be meaningful.
+
+\item[\textbf{iSCSI (Internet Small Computer Systems Interface)}]
+A transport protocol that encapsulates \textit{SCSI} commands inside TCP/IP
+packets, enabling block-level storage access over standard Ethernet
+networks.
+
+\item[\textbf{iSNS (Internet Storage Name Service)}]
+A discovery protocol for iSCSI and Fibre Channel over Ethernet environments.
+iSNS provides automated discovery, registration, and management of storage
+nodes on an IP network.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{K}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{Kerberos}]
+A network authentication protocol based on symmetric-key cryptography and a
+trusted third-party ticket-granting service. In storage, Kerberos secures
+NFSv4 (\texttt{sec=krb5/krb5i/krb5p}) and SMB sessions.
+
+\item[\textbf{KMIP (Key Management Interoperability Protocol)}]
+An OASIS standard for communication between key management servers and
+encryption clients. Storage systems use KMIP to manage encryption keys for
+\textit{SED}, \textit{NVE}, \textit{NAE}, and \textit{LUKS} volumes.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{L}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{L2ARC (Level-2 Adaptive Replacement Cache)}]
+A secondary read cache in \textit{ZFS} stored on a fast device (typically
+NVMe or SSD). The L2ARC extends the in-memory \textit{ARC} for
+working sets that exceed available RAM.
+
+\item[\textbf{LIF (Logical Interface)}]
+A virtual network endpoint in \textit{ONTAP} that can migrate between
+physical ports and nodes. LIFs provide protocol-specific access (NFS,
+CIFS, iSCSI, FC) and enable non-disruptive operations.
+
+\item[\textbf{Little's Law}]
+A queueing-theory result relating average queue length ($L$), average
+arrival rate ($\lambda$), and average wait time ($W$): $L = \lambda W$.
+Widely used to model storage I/O latency and queue depth.
+
+\item[\textbf{LUKS (Linux Unified Key Setup)}]
+The standard on-disk format for full-disk encryption on Linux. LUKS stores
+key material and cipher metadata in a header, managed by
+\texttt{cryptsetup}. LUKS2 adds Argon2 key derivation and authenticated
+encryption.
+
+\item[\textbf{LUN (Logical Unit Number)}]
+A logical address that identifies a specific storage volume or partition
+presented over a \textit{SAN} (FC, iSCSI, or NVMe-oF). From the host
+perspective, a LUN appears as a local block device.
+
+\item[\textbf{LVM (Logical Volume Manager)}]
+A Linux subsystem that provides an abstraction layer between physical
+disks/partitions and filesystems. LVM enables online resizing, snapshots,
+thin provisioning, and striping.
+
+\item[\textbf{Lustre}]
+A POSIX-compliant parallel distributed filesystem designed for HPC clusters.
+Lustre separates metadata (managed by \textit{MDS} nodes) from data
+(stored on \textit{OST} targets) to deliver massive aggregate throughput.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{M}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{MAV (Multi-Admin Verification)}]
+An ONTAP security feature that requires approval from multiple designated
+administrators before critical operations (e.g., volume deletion or
+SnapLock modification) can be executed.
+
+\item[\textbf{MD-RAID}]
+The Linux kernel's software RAID implementation managed by \texttt{mdadm}.
+MD-RAID supports levels 0, 1, 4, 5, 6, and 10, with online reshape and
+hot-spare capabilities.
+
+\item[\textbf{MDS (Metadata Server)}]
+A server or daemon responsible for managing filesystem namespace operations
+(directory listing, file creation, permission checks). Used in
+\textit{CephFS}, \textit{Lustre}, and other parallel filesystems.
+
+\item[\textbf{MetroCluster}]
+A NetApp high-availability and disaster-recovery solution that synchronously
+mirrors data between two geographically separated ONTAP clusters using
+\textit{SyncMirror} over dedicated links.
+
+\item[\textbf{MinIO}]
+A high-performance, Kubernetes-native object storage server that implements
+the S3 API. MinIO is commonly deployed for on-premises or hybrid-cloud
+object storage.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{N}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{NAE (NetApp Aggregate Encryption)}]
+An ONTAP software encryption feature that encrypts all data within an
+aggregate using AES-256, providing volume-level encryption without
+requiring \textit{SED} drives. See also \textit{NVE}.
+
+\item[\textbf{NAS (Network-Attached Storage)}]
+A file-level storage architecture in which a dedicated appliance or server
+shares filesystems over a network using protocols such as \textit{NFS} or
+\textit{SMB/CIFS}. Clients mount remote exports as local directories.
+
+\item[\textbf{NFS (Network File System)}]
+A distributed filesystem protocol that allows clients to access files over a
+network as though they were local. NFSv4.x adds stateful operation,
+compound RPCs, \textit{pNFS} extensions, and strong security via
+\textit{Kerberos}.
+
+\item[\textbf{NIS2 (Network and Information Security Directive 2)}]
+An EU directive that imposes cybersecurity risk-management and
+incident-reporting obligations on operators of essential and important
+services, including data centre and cloud providers.
+
+\item[\textbf{NSE (NetApp Storage Encryption)}]
+Hardware-based encryption at rest using \textit{SED} (self-encrypting
+drives) managed by ONTAP. NSE protects against physical drive theft without
+software overhead.
+
+\item[\textbf{NVE (NetApp Volume Encryption)}]
+A software-based ONTAP encryption feature that encrypts data at the volume
+(FlexVol/FlexGroup) level using AES-256. NVE can layer on top of NSE for
+double encryption.
+
+\item[\textbf{NVMe (Non-Volatile Memory Express)}]
+A host controller interface and storage protocol optimised for flash and
+next-generation non-volatile memory. NVMe uses PCIe lanes and deep
+parallel queues (up to 64\,K queues, each 64\,K entries deep) to minimise
+latency.
+
+\item[\textbf{NVMe-oF (NVMe over Fabrics)}]
+An extension of the NVMe protocol that runs over network fabrics such as
+\textit{RoCE}, Fibre Channel (\textit{FC-NVMe}), or TCP. NVMe-oF brings
+NVMe-class latency to remote storage.
+
+\item[\textbf{NVRAM (Non-Volatile Random-Access Memory)}]
+Battery- or capacitor-backed memory used in storage controllers to
+journal incoming writes before they are committed to persistent media.
+NVRAM enables fast write acknowledgement while guaranteeing durability.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{O}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{OCFS2 (Oracle Cluster File System 2)}]
+A shared-disk cluster filesystem for Linux developed by Oracle. OCFS2 allows
+multiple nodes to concurrently read and write to shared storage, often used
+with Oracle RAC databases.
+
+\item[\textbf{OKM (Onboard Key Manager)}]
+An ONTAP component that stores encryption keys locally on the storage
+cluster using a secure key hierarchy, as an alternative to an external
+\textit{KMIP} server.
+
+\item[\textbf{ONTAP}]
+NetApp's storage operating system powering \textit{FAS}, \textit{AFF},
+\textit{CVO}, \textit{FSx for ONTAP}, and \textit{GCNV}. ONTAP provides
+unified (SAN + NAS) multiprotocol access, \textit{WAFL},
+\textit{SnapMirror}, and comprehensive data services.
+
+\item[\textbf{OSD (Object Storage Daemon)}]
+A Ceph daemon responsible for storing data objects, handling replication,
+recovery, rebalancing, and scrubbing on a single storage device. Each OSD
+typically maps to one physical disk.
+
+\item[\textbf{OST (Object Storage Target)}]
+A \textit{Lustre} component that stores file data objects. Lustre stripes
+file content across multiple OSTs to maximise aggregate throughput.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{P}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{pNFS (Parallel NFS)}]
+An NFSv4.1 extension that allows clients to perform direct, parallel I/O to
+multiple data servers. The metadata server provides layout maps so clients
+can bypass the single NFS server bottleneck.
+
+\item[\textbf{PV (Persistent Volume)}]
+A Kubernetes object representing a piece of storage in the cluster.\ PVs
+are provisioned by administrators or dynamically via a \textit{CSI} driver
+and bound to \textit{PVCs} by matching capacity and access modes.
+
+\item[\textbf{PVC (Persistent Volume Claim)}]
+A Kubernetes resource that requests storage of a specified size and access
+mode. The cluster binds the PVC to a matching \textit{PV}.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{Q}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{QoS (Quality of Service)}]
+A set of mechanisms that guarantee minimum throughput and/or cap maximum IOPS
+and bandwidth for a storage workload. QoS policies prevent noisy-neighbour
+effects in multi-tenant environments.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{R}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{RADOS (Reliable Autonomic Distributed Object Store)}]
+The foundational object storage layer of \textit{Ceph}. RADOS distributes
+objects across \textit{OSDs} using the \textit{CRUSH} algorithm and
+provides self-healing replication or erasure coding.
+
+\item[\textbf{RAID (Redundant Array of Independent Disks)}]
+A family of techniques that combine multiple physical drives to improve
+performance, capacity, or fault tolerance. Common levels include RAID-0
+(striping), RAID-1 (mirroring), RAID-5 (single parity), and RAID-6
+(double parity).
+
+\item[\textbf{RAID-DP}]
+NetApp's proprietary double-parity RAID implementation in \textit{ONTAP},
+functionally equivalent to RAID-6 but optimised for the \textit{WAFL}
+filesystem layout.
+
+\item[\textbf{RAID-TEC}]
+NetApp's triple-parity RAID for \textit{ONTAP}, capable of tolerating three
+simultaneous disk failures within a RAID group. Recommended for
+large-capacity HDDs.
+
+\item[\textbf{RAID-Z}]
+The \textit{ZFS} family of distributed-parity schemes. RAID-Z1, Z2, and Z3
+tolerate one, two, or three device failures respectively. RAID-Z avoids
+the write hole by using variable-width stripes.
+
+\item[\textbf{RBD (RADOS Block Device)}]
+A block storage interface layered on \textit{RADOS} in Ceph. RBD images
+are thin-provisioned, snapshotable, and can be mapped as local block
+devices or consumed by virtual machines and Kubernetes pods.
+
+\item[\textbf{RDMA (Remote Direct Memory Access)}]
+A networking technology that transfers data directly between the memory of
+two computers without involving the CPU or operating system of either host.
+\textit{RoCE} and InfiniBand are common RDMA transports for storage.
+
+\item[\textbf{RGW (RADOS Gateway)}]
+The Ceph component that provides S3- and Swift-compatible object storage
+APIs on top of \textit{RADOS}. RGW supports multi-site replication and
+bucket-level policies.
+
+\item[\textbf{RoCE (RDMA over Converged Ethernet)}]
+A network protocol that allows \textit{RDMA} over standard Ethernet
+infrastructure. RoCEv2 runs over UDP/IP and is widely used for
+\textit{NVMe-oF} and GPU interconnects.
+
+\item[\textbf{RPO (Recovery Point Objective)}]
+The maximum acceptable age of data that can be lost after a failure,
+measured from the last successful backup or replication. An RPO of zero
+requires synchronous replication.
+
+\item[\textbf{RTO (Recovery Time Objective)}]
+The maximum acceptable duration from a failure event to full service
+restoration. RTO drives the choice between hot standby, warm failover,
+and cold restore strategies.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{S}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{S3 (Simple Storage Service)}]
+An object storage API originally defined by Amazon Web Services. S3 has
+become a de facto standard: many on-premises systems (\textit{StorageGRID},
+\textit{MinIO}, Ceph \textit{RGW}) implement S3-compatible endpoints.
+
+\item[\textbf{SAN (Storage Area Network)}]
+A dedicated high-speed network that provides block-level access to storage.
+SANs typically use \textit{FC}, \textit{iSCSI}, or \textit{NVMe-oF}
+transports and present \textit{LUNs} to connected hosts.
+
+\item[\textbf{SCSI (Small Computer Systems Interface)}]
+A set of standards for physically connecting and transferring data between
+computers and peripheral devices. The SCSI command set underpins FC, iSCSI,
+and SAS storage protocols.
+
+\item[\textbf{SED (Self-Encrypting Drive)}]
+A storage device with built-in hardware encryption that transparently
+encrypts all data written to the media. SEDs conform to the \textit{TCG
+Opal} standard and protect data at rest without performance penalty.
+
+\item[\textbf{SELinux (Security-Enhanced Linux)}]
+A mandatory access control (MAC) framework in the Linux kernel that enforces
+security policies beyond traditional discretionary access controls.
+SELinux labels can restrict which processes may access storage paths.
+
+\item[\textbf{SLOG (Separate Log Device)}]
+A dedicated device that provides persistent storage for the ZFS Intent Log
+(\textit{ZIL}) in \textit{ZFS}. A fast SLOG (NVMe or Optane) accelerates
+synchronous write workloads (e.g., NFS, databases).
+
+\item[\textbf{SMB (Server Message Block)}]
+A network file-sharing protocol used primarily in Windows environments. SMB
+3.x adds encryption, multichannel, continuous availability, and RDMA
+(\texttt{SMB Direct}) support. See also \textit{CIFS}.
+
+\item[\textbf{SnapLock}]
+An ONTAP compliance feature that provides tamper-proof \textit{WORM}
+storage. SnapLock volumes prevent data modification or deletion until a
+configurable retention period expires, meeting regulatory requirements such
+as SEC 17a-4 and \textit{GDPR}.
+
+\item[\textbf{SnapMirror}]
+A NetApp replication technology that efficiently mirrors data between ONTAP
+systems (on-premises or cloud) at the volume or consistency-group level.
+SnapMirror supports asynchronous, synchronous, and semi-synchronous modes.
+
+\item[\textbf{SnapVault}]
+A NetApp disk-to-disk backup technology based on \textit{SnapMirror} that
+maintains a vault of read-only snapshot copies for long-term retention.
+
+\item[\textbf{StorageGRID}]
+A NetApp software-defined object storage platform that provides an
+S3-compatible interface with policy-driven data placement, erasure coding,
+and information lifecycle management (ILM) across multiple sites.
+
+\item[\textbf{SVM (Storage Virtual Machine)}]
+A logical partition within an \textit{ONTAP} cluster that owns its own
+volumes, \textit{LIFs}, and protocol configuration. SVMs enable secure
+multi-tenancy on shared hardware.
+
+\item[\textbf{SyncMirror}]
+An ONTAP feature that synchronously mirrors data at the aggregate level
+across two physical storage pools (plexes), providing local high
+availability. SyncMirror is a building block of \textit{MetroCluster}.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{T}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{TBW (Terabytes Written)}]
+A cumulative SSD endurance metric representing the total amount of data
+that can be written to a drive over its warranty life. See also
+\textit{DWPD}.
+
+\item[\textbf{TCG Opal}]
+A specification from the Trusted Computing Group that defines a standard
+interface for \textit{SED} management, including key management, locking
+ranges, and authentication.
+
+\item[\textbf{Trident}]
+NetApp's open-source \textit{CSI} driver for Kubernetes. Trident provisions
+persistent volumes on ONTAP (NFS, iSCSI, NVMe-oF), SolidFire, and cloud
+storage back-ends. Now part of NetApp BlueXP.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{V}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{VADP (vSphere APIs for Data Protection)}]
+VMware APIs that enable backup applications to create and manage VM
+snapshots, perform \textit{CBT}-based incremental backups, and restore
+virtual machines without installing agents inside guests.
+
+\item[\textbf{VDO (Virtual Data Optimizer)}]
+A Linux kernel module (now integrated into LVM as \texttt{lvcreate --type
+vdo}) that provides inline deduplication and compression at the block
+layer.
+
+\item[\textbf{VFS (Virtual File System)}]
+An abstraction layer in the Linux kernel that provides a uniform interface
+for user-space programs to interact with different filesystem
+implementations (ext4, XFS, Btrfs, NFS, etc.).
+
+\item[\textbf{vSAN}]
+VMware's hyper-converged, software-defined storage layer that aggregates
+local disks across ESXi hosts into a shared datastore with policy-driven
+placement, erasure coding, and deduplication.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{W}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{WAFL (Write Anywhere File Layout)}]
+NetApp's proprietary copy-on-write filesystem at the heart of
+\textit{ONTAP}. WAFL never overwrites data in place, enabling efficient
+snapshots, clones, and consistency guarantees.
+
+\item[\textbf{WekaFS}]
+A high-performance, POSIX-compliant parallel filesystem designed for
+GPU-intensive AI/ML workloads. WekaFS stripes data across NVMe tiers and
+supports tiering to object storage.
+
+\item[\textbf{WORM (Write Once, Read Many)}]
+A storage policy that prevents modification or deletion of written data.
+WORM is a regulatory requirement in financial services, healthcare, and
+government. See also \textit{SnapLock}.
+
+\item[\textbf{WWNN (World Wide Node Name)}]
+A globally unique 64-bit identifier assigned to a Fibre Channel node (e.g.,
+a storage controller or HBA). Each node may have multiple \textit{WWPN}
+ports.
+
+\item[\textbf{WWPN (World Wide Port Name)}]
+A globally unique 64-bit identifier assigned to an individual port on a
+Fibre Channel node. WWPNs are used in SAN zoning and LUN masking to
+control host access.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{X}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{XFS}]
+A high-performance 64-bit journaling filesystem originally developed by SGI.
+XFS excels at large files and parallel I/O, supports online growth, and is
+the default filesystem on RHEL, CentOS, and Rocky Linux.
+
+\end{description}
+
+%% ---------------------------------------------------------------------------
+\section*{Z}
+%% ---------------------------------------------------------------------------
+
+\begin{description}
+
+\item[\textbf{ZFS (Zettabyte File System)}]
+A combined volume manager and filesystem originally developed by Sun
+Microsystems. ZFS provides copy-on-write, end-to-end checksumming,
+snapshots, clones, inline compression, deduplication, \textit{RAID-Z}, and
+\textit{dRAID}. On Linux it is available through OpenZFS.
+
+\item[\textbf{ZIL (ZFS Intent Log)}]
+A write-ahead log in \textit{ZFS} that records synchronous write
+transactions. The ZIL is replayed after a crash to guarantee transactional
+consistency. A dedicated \textit{SLOG} device can accelerate ZIL commits.
+
+\item[\textbf{ZNS (Zoned Namespace SSDs)}]
+An NVMe specification where the drive's address space is divided into
+sequential-write-required zones. ZNS reduces write amplification, improves
+endurance, and lowers per-GB cost by eliminating the device-side Flash
+Translation Layer for those zones.
+
+\end{description}
