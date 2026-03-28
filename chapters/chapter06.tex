@@ -96,6 +96,62 @@ Zone membership can be defined by switch port (domain\_id/port\_number) or by Wo
 WWN-based zoning ties zone membership to the identity of a specific device. The zone configuration specifies WWPNs, and the fabric enforces membership based on the device's claimed identity. WWN zoning is more commonly used in practice because it survives cable moves without zone reconfiguration changes, but it carries the implicit assumption that WWPNs can be trusted --- which requires attention at the HBA and array configuration level.
 
 \section{Zone Design Principles}
+
+Figure~\ref{fig:san-fabric} shows a typical dual-controller SAN fabric topology with FC zoning.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.82, every node/.style={transform shape}]
+  % Hosts on the left
+  \node[component, minimum height=1.0cm] (h1) at (-5.5, 2.0)  {Host A\\{\tiny HBA1}};
+  \node[component, minimum height=1.0cm] (h2) at (-5.5, 0.0)  {Host B\\{\tiny HBA2}};
+  \node[component, minimum height=1.0cm] (h3) at (-5.5,-2.0)  {Host C\\{\tiny HBA3}};
+
+  % FC Switch
+  \node[component dark, minimum width=2.4cm, minimum height=5.0cm] (sw) at (0,0) {};
+  \node[diagramlabel] at (0,2.0) {FC Switch};
+
+  % Zone 1 (dashed group)
+  \draw[dashed, securityred, thick, rounded corners=4pt] (-1.0, 0.7) rectangle (1.0, 1.7);
+  \node[smalllabel, securityred] at (0, 1.2) {Zone 1};
+
+  % Zone 2 (dashed group)
+  \draw[dashed, accentblue, thick, rounded corners=4pt] (-1.0,-1.7) rectangle (1.0,-0.7);
+  \node[smalllabel, accentblue] at (0,-1.2) {Zone 2};
+
+  % Storage Array on the right
+  \node[component accent, minimum width=2.2cm, minimum height=1.0cm] (ctrla) at (5.5, 1.0) {Controller A};
+  \node[component accent, minimum width=2.2cm, minimum height=1.0cm] (ctrlb) at (5.5,-1.0) {Controller B};
+
+  % LUNs
+  \node[disk] (lun0) at (8.0, 1.5)  {LUN 0};
+  \node[disk] (lun1) at (8.0, 0.5)  {LUN 1};
+  \node[disk] (lun2) at (8.0,-0.5)  {LUN 2};
+  \node[disk] (lun3) at (8.0,-1.5)  {LUN 3};
+
+  % Groupbox for array
+  \draw[groupbox] (4.2,-2.0) rectangle (9.0,2.2);
+  \node[smalllabel, anchor=north west] at (4.3,2.1) {Storage Array};
+
+  % Host-to-switch connections
+  \draw[dataarrow thin] (h1.east) -- (sw.west |- h1.east);
+  \draw[dataarrow thin] (h2.east) -- (sw.west);
+  \draw[dataarrow thin] (h3.east) -- (sw.west |- h3.east);
+
+  % Switch-to-controller connections
+  \draw[dataarrow thin] (sw.east |- ctrla.west) -- (ctrla.west);
+  \draw[dataarrow thin] (sw.east |- ctrlb.west) -- (ctrlb.west);
+
+  % Controller-to-LUN connections
+  \draw[dataarrow thin] (ctrla.east) -- (lun0.west);
+  \draw[dataarrow thin] (ctrla.east) -- (lun1.west);
+  \draw[dataarrow thin] (ctrlb.east) -- (lun2.west);
+  \draw[dataarrow thin] (ctrlb.east) -- (lun3.west);
+\end{tikzpicture}
+\caption{SAN fabric topology: hosts connect through an FC switch with zoning to a dual-controller storage array.}
+\label{fig:san-fabric}
+\end{figure}
+
 The fundamental principle of SAN zone design is one initiator per zone with all its required targets. This means each host HBA port gets its own zone, shared with only the array target ports that the host legitimately needs to access. This design limits the blast radius of a misconfiguration: a host with a rogue driver or firmware bug can corrupt its own LUNs but cannot affect LUNs on targets it cannot discover.
 
 A common but inferior practice is the "all targets in one zone per initiator" design, where multiple hosts share a zone. This makes zone management simpler (fewer zones to manage) but allows inter-host target discovery and increases the potential for interference. For environments with strict isolation requirements --- multi-tenant shared infrastructure, PCI DSS scope reduction, environments with mixed criticality workloads --- single-initiator zones are essential.
@@ -249,6 +305,40 @@ One of the most significant operational risks in a Fibre Channel fabric is a zon
 
 \section{Multipath I/O}
 In a dual-fabric SAN with multiple array controller ports, a single LUN is typically accessible through four or more physical paths. Without multipath software, the host's OS would present each path as a separate disk device, leading to data corruption if multiple paths are used without coordination. Multipath I/O (MPIO) software on the host aggregates the multiple paths to each LUN into a single logical device and implements load balancing and failover policies.
+
+Figure~\ref{fig:multipath-alua} illustrates how DM-Multipath manages active/optimized and active/non-optimized paths through dual controllers to a shared LUN.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.85, every node/.style={transform shape}]
+  % Host at top
+  \node[component dark, minimum width=4cm, minimum height=0.9cm] (host) at (0, 0) {Host (DM-Multipath)};
+
+  % Two paths
+  \node[component green, minimum width=2.8cm, minimum height=0.7cm] (pathA) at (-2.5,-1.5) {Active/Optimized};
+  \node[component gray,  minimum width=2.8cm, minimum height=0.7cm] (pathB) at ( 2.5,-1.5) {Active/Non-Opt.};
+
+  % Two controllers
+  \node[component accent, minimum width=2.8cm, minimum height=0.9cm] (ctrA) at (-2.5,-3.0) {Controller A\\{\tiny(owns LUN)}};
+  \node[component,       minimum width=2.8cm, minimum height=0.9cm] (ctrB) at ( 2.5,-3.0) {Controller B\\{\tiny(proxy path)}};
+
+  % LUN at bottom
+  \node[component dark, minimum width=3.5cm, minimum height=0.8cm] (lun) at (0,-4.5) {LUN};
+
+  % Arrows
+  \draw[dataarrow] (host.south) -- ++(-2.5,0) |- (pathA.north);
+  \draw[dataarrow thin] (host.south) -- ++(2.5,0) |- (pathB.north);
+  \draw[dataarrow] (pathA.south) -- (ctrA.north);
+  \draw[dataarrow thin] (pathB.south) -- (ctrB.north);
+  \draw[dataarrow] (ctrA.south) |- (lun.west);
+  \draw[dataarrow thin] (ctrB.south) |- (lun.east);
+
+  % ALUA label
+  \draw[biarrow, dashed] (ctrA.east) -- (ctrB.west) node[midway, above, smalllabel] {ALUA};
+\end{tikzpicture}
+\caption{Multipath I/O with ALUA: active/optimized and active/non-optimized paths through dual controllers.}
+\label{fig:multipath-alua}
+\end{figure}
 
 Linux DM-Multipath uses device WWIDs (derived from the device's SCSI Inquiry data or NVMe identification) to correlate paths to the same underlying device. Path selection policies range from round-robin across all active paths to queue-depth-weighted round-robin and vendor-specific ALUA-aware policies. VMware's Native Multipathing Plugin (NMP) with vendor-specific Storage Array Type Plugins (SATPs) performs similar functions in ESXi.
 

@@ -75,6 +75,61 @@ In Veeam's implementation, the repository maintains a virtual full backup (a VBK
 
 Forever incremental architectures work particularly well in deduplicated backup repositories, where changed blocks in successive incrementals are deduplicated against existing stored blocks, reducing the incremental footprint further. Scale-out backup repositories (such as Veeam's scale-out repository or Commvault's disk library configurations) combine forever incremental with deduplication and compression to achieve very high storage efficiency while maintaining rapid restore from the most recent restore point.
 
+Figure~\ref{fig:backup-chains} compares the three principal backup chain architectures, showing how each organizes full, incremental, and differential backup sets over time and the dependency relationships that determine restore complexity.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.8, every node/.style={transform shape}]
+  % Row labels
+  \node[diagramlabel, anchor=east] at (-0.3, 3.5) {Full + Incremental};
+  \node[diagramlabel, anchor=east] at (-0.3, 1.5) {Full + Differential};
+  \node[diagramlabel, anchor=east] at (-0.3, -0.5) {Incremental Forever};
+
+  % === Row 1: Full + Incremental ===
+  \node[component dark, minimum width=1.4cm, minimum height=0.7cm] (f1) at (1, 3.5) {\small Full};
+  \node[component accent, minimum width=1.4cm, minimum height=0.7cm] (i1) at (2.8, 3.5) {\small Inc};
+  \node[component accent, minimum width=1.4cm, minimum height=0.7cm] (i2) at (4.6, 3.5) {\small Inc};
+  \node[component accent, minimum width=1.4cm, minimum height=0.7cm] (i3) at (6.4, 3.5) {\small Inc};
+  \node[component dark, minimum width=1.4cm, minimum height=0.7cm] (f2) at (8.2, 3.5) {\small Full};
+  \node[component accent, minimum width=1.4cm, minimum height=0.7cm] (i4) at (10.0, 3.5) {\small Inc};
+
+  \draw[dataarrow thin, ->] (f1) -- (i1);
+  \draw[dataarrow thin, ->] (i1) -- (i2);
+  \draw[dataarrow thin, ->] (i2) -- (i3);
+  \draw[dataarrow thin, ->] (f2) -- (i4);
+
+  % === Row 2: Full + Differential ===
+  \node[component dark, minimum width=1.4cm, minimum height=0.7cm] (fd1) at (1, 1.5) {\small Full};
+  \node[component green, minimum width=1.4cm, minimum height=0.7cm] (d1) at (2.8, 1.5) {\small Diff};
+  \node[component green, minimum width=1.4cm, minimum height=0.7cm] (d2) at (4.6, 1.5) {\small Diff};
+  \node[component green, minimum width=1.4cm, minimum height=0.7cm] (d3) at (6.4, 1.5) {\small Diff};
+  \node[component dark, minimum width=1.4cm, minimum height=0.7cm] (fd2) at (8.2, 1.5) {\small Full};
+
+  \draw[dataarrow thin, ->] (fd1) -- (d1);
+  \draw[dataarrow thin, ->] (fd1.north east) .. controls +(0.8,0.4) and +(-0.8,0.4) .. (d2.north west);
+  \draw[dataarrow thin, ->] (fd1.north east) .. controls +(1.5,0.7) and +(-1.0,0.7) .. (d3.north west);
+
+  % === Row 3: Incremental Forever ===
+  \node[component dark, minimum width=1.4cm, minimum height=0.7cm] (ff1) at (1, -0.5) {\small Full};
+  \node[component accent, minimum width=1.4cm, minimum height=0.7cm] (fi1) at (2.8, -0.5) {\small Inc};
+  \node[component accent, minimum width=1.4cm, minimum height=0.7cm] (fi2) at (4.6, -0.5) {\small Inc};
+  \node[component accent, minimum width=1.4cm, minimum height=0.7cm] (fi3) at (6.4, -0.5) {\small Inc};
+  \node[component accent, minimum width=1.4cm, minimum height=0.7cm] (fi4) at (8.2, -0.5) {\small Inc};
+  \node[component accent, minimum width=1.4cm, minimum height=0.7cm] (fi5) at (10.0, -0.5) {\small Inc};
+
+  \draw[dataarrow thin, ->] (ff1) -- (fi1);
+  \draw[dataarrow thin, ->] (fi1) -- (fi2);
+  \draw[dataarrow thin, ->] (fi2) -- (fi3);
+  \draw[dataarrow thin, ->] (fi3) -- (fi4);
+  \draw[dataarrow thin, ->] (fi4) -- (fi5);
+
+  % Timeline arrow
+  \draw[->, thick, midgray] (0, -1.5) -- (11, -1.5) node[right] {\small Time};
+\end{tikzpicture}
+\caption{Backup chain architectures compared. Full plus incremental chains require all incrementals since the last full for restore. Full plus differential chains require only the last full and the most recent differential (arrows show each differential depends on the full). Incremental forever takes a single initial full and runs incrementals indefinitely, synthesizing full restore points in the backup repository.}
+\label{fig:backup-chains}
+\end{figure}
+
 \section{Backup Targets}
 Where backup data is stored is as strategically significant as how it is organized. Different backup target types offer different combinations of cost, performance, capacity, durability, and ransomware resilience.
 
@@ -250,6 +305,41 @@ The goal of the backup security architecture is to ensure that even a worst-case
 Replication and backup solve overlapping but distinct problems. Backup creates point-in-time recovery copies at intervals, tolerating a defined data loss window in exchange for simplicity and independence from the production infrastructure. Replication maintains a continuously or near-continuously updated secondary copy of data, minimizing or eliminating data loss but creating a persistent dependency on the secondary infrastructure and the network connecting them. Disaster recovery combines both technologies with orchestration, runbook automation, and governance into a coherent program that ensures an organization can continue operating critical functions after a major disruptive event.
 
 This chapter examines replication from the physics of synchronous vs. asynchronous semantics through the specific implementations of the major storage array vendors, then moves to host- and hypervisor-layer replication, continuous data protection, and the complex domain of stretch clustering and metropolitan high availability. It concludes with DR orchestration --- the tooling and discipline that transforms isolated replication relationships into tested, executable recovery programs --- and addresses multi-site and multi-cloud DR strategies.
+
+Replication topologies determine how data flows between sites. As shown in Figure~\ref{fig:replication-topologies}, the three fundamental topologies --- fan-out, cascade, and active-active --- each serve different architectural requirements for geographic distribution and recovery.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.85, every node/.style={transform shape}]
+  % === Fan-Out ===
+  \node[diagramlabel] at (-0.5, 4.8) {Fan-Out};
+  \node[component dark] (fo-src) at (-0.5, 3.5) {Source};
+  \node[component accent] (fo-a) at (-2.5, 1.8) {Dest A};
+  \node[component accent] (fo-b) at (-0.5, 1.8) {Dest B};
+  \node[component accent] (fo-c) at (1.5, 1.8) {Dest C};
+  \draw[dataarrow] (fo-src) -- (fo-a);
+  \draw[dataarrow] (fo-src) -- (fo-b);
+  \draw[dataarrow] (fo-src) -- (fo-c);
+
+  % === Cascade ===
+  \node[diagramlabel] at (5.5, 4.8) {Cascade};
+  \node[component dark] (ca-src) at (3.5, 3.5) {Source};
+  \node[component accent] (ca-a) at (5.5, 3.5) {Dest A};
+  \node[component accent] (ca-b) at (7.5, 3.5) {Dest B};
+  \node[component accent] (ca-c) at (9.5, 3.5) {Dest C};
+  \draw[dataarrow] (ca-src) -- (ca-a);
+  \draw[dataarrow] (ca-a) -- (ca-b);
+  \draw[dataarrow] (ca-b) -- (ca-c);
+
+  % === Active-Active ===
+  \node[diagramlabel] at (13, 4.8) {Active--Active};
+  \node[component dark] (aa-a) at (11.8, 3.5) {Site A};
+  \node[component dark] (aa-b) at (14.2, 3.5) {Site B};
+  \draw[biarrow] (aa-a) -- (aa-b);
+\end{tikzpicture}
+\caption{Replication topologies. Fan-out distributes data from a single source to multiple destinations for read scaling or multi-site DR. Cascade chains replication through intermediate sites, reducing source bandwidth requirements. Active-active maintains bidirectional synchronous replication between two sites for zero-RPO, zero-RTO protection.}
+\label{fig:replication-topologies}
+\end{figure}
 
 \section{Synchronous vs. Asynchronous Replication: The RPO Trade-off}
 The most fundamental replication design decision is whether replication is synchronous or asynchronous, and this decision is governed by physics and economics rather than vendor preference.

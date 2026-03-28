@@ -7,6 +7,39 @@
 \label{sec:block-devices}
 %% ---------------------------------------------------------------------------
 
+Figure~\ref{fig:io-stack} illustrates the complete Linux I/O path from application to hardware, showing each layer that a storage request traverses.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.9, every node/.style={transform shape}]
+  % Layers from top to bottom
+  \node[layer]                          (app)    at (0, 0)    {Application};
+  \node[layer]                          (syscall)at (0,-1.0)  {System Call Interface};
+  \node[layer]                          (vfs)    at (0,-2.0)  {VFS (Virtual File System)};
+  \node[layer accent]                   (fs)     at (0,-3.0)  {Filesystem (ext4 / XFS / ZFS)};
+  \node[layer accent]                   (cache)  at (0,-4.0)  {Page Cache};
+  \node[layer]                          (block)  at (0,-5.0)  {Block Layer (bio, I/O Scheduler)};
+  \node[layer]                          (driver) at (0,-6.0)  {Device Driver (SCSI / NVMe)};
+  \node[layer dark]                     (hw)     at (0,-7.0)  {Hardware (HDD / SSD / NVMe)};
+
+  % Arrows
+  \draw[dataarrow] (app.south)     -- (syscall.north);
+  \draw[dataarrow] (syscall.south) -- (vfs.north);
+  \draw[dataarrow] (vfs.south)     -- (fs.north);
+  \draw[dataarrow] (fs.south)      -- (cache.north);
+  \draw[dataarrow] (cache.south)   -- (block.north);
+  \draw[dataarrow] (block.south)   -- (driver.north);
+  \draw[dataarrow] (driver.south)  -- (hw.north);
+
+  % Boundary annotations
+  \draw[dashed, midgray, thick] (-5.8,-0.55) -- (5.8,-0.55);
+  \node[smalllabel, anchor=west] at (5.4, 0)     {User Space};
+  \node[smalllabel, anchor=west] at (5.4,-1.0)   {Kernel Space};
+\end{tikzpicture}
+\caption{The Linux I/O stack from application to hardware.}
+\label{fig:io-stack}
+\end{figure}
+
 Linux classifies hardware devices into two fundamental categories. \textbf{Character devices} deliver data as a stream of bytes with no inherent structure --- serial ports, terminals, and random number generators are canonical examples. \textbf{Block devices}, by contrast, expose storage as an array of fixed-size blocks (historically 512 bytes, now commonly 4,096 bytes) that can be read or written at arbitrary offsets. Hard disk drives, solid-state drives, NVMe namespaces, device-mapper virtual devices, and loopback devices are all block devices. The distinction matters because the kernel applies block-layer optimizations --- I/O merging, scheduling, caching --- only to block devices.
 
 \subsection{Device Naming Conventions}

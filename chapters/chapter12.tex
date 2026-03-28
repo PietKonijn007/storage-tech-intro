@@ -48,6 +48,47 @@ Cloud cold object storage --- Amazon S3 Glacier Deep Archive, Azure Archive Stor
 
 The trade-off is egress: data retrieved from cloud cold tiers incurs per-GB egress charges that can make frequent retrieval extremely expensive. Cold cloud storage is appropriate only for data that is stored for compliance, legal hold, or disaster recovery purposes and expected to be retrieved rarely if ever.
 
+Figure~\ref{fig:storage-tiering-hierarchy} summarizes the storage hierarchy from fastest to slowest, illustrating the inverse relationship between performance and capacity cost that drives all tiering and caching architectures.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.85, every node/.style={transform shape}]
+  % Pyramid layers (bottom to top, widest to narrowest)
+  \node[layer, minimum width=12cm, fill=accentblue!15, minimum height=0.9cm]
+    (t5) at (0, 0) {Object Storage / Tape};
+  \node[layer, minimum width=10cm, fill=accentblue!25, minimum height=0.9cm]
+    (t4) at (0, 1.2) {HDD (Nearline)};
+  \node[layer, minimum width=8cm, fill=accentblue!40, minimum height=0.9cm]
+    (t3) at (0, 2.4) {SAS/SATA SSD};
+  \node[layer, minimum width=6cm, fill=accentblue!60, minimum height=0.9cm]
+    (t2) at (0, 3.6) {NVMe SSD};
+  \node[layer, minimum width=4cm, fill=accentblue!80, text=white, minimum height=0.9cm]
+    (t1) at (0, 4.8) {DRAM Cache};
+
+  % Right-side latency labels
+  \node[smalllabel, anchor=west] at (2.3, 4.8) {ns latency};
+  \node[smalllabel, anchor=west] at (3.3, 3.6) {$\mu$s latency};
+  \node[smalllabel, anchor=west] at (4.3, 2.4) {$\mu$s latency};
+  \node[smalllabel, anchor=west] at (5.3, 1.2) {ms latency};
+  \node[smalllabel, anchor=west] at (6.3, 0) {s--min latency};
+
+  % Left axis — Performance arrow
+  \draw[->, very thick, chapterblue] (-7, -0.3) -- (-7, 5.3);
+  \node[diagramlabel, rotate=90, anchor=south] at (-7.5, 2.5) {Performance};
+
+  % Right axis — Capacity / Cost arrow (inverted)
+  \draw[->, very thick, securityred] (8.5, 5.3) -- (8.5, -0.3);
+  \node[rotate=270, anchor=south, font=\bfseries, text=securityred] at (9.0, 2.5) {Capacity / Cost};
+
+  % Cost annotations
+  \node[smalllabel, anchor=east] at (-2.3, 4.8) {\$/GB highest};
+  \node[smalllabel, anchor=east] at (-5.3, 1.2) {};
+  \node[smalllabel, anchor=east] at (-6.3, 0) {\$/GB lowest};
+\end{tikzpicture}
+\caption{The storage tiering hierarchy. Each tier trades latency for cost and capacity. DRAM provides nanosecond access at the highest cost per gigabyte; object storage and tape provide the lowest cost per gigabyte with access times measured in seconds to minutes. The inverse relationship between the left axis (performance, increasing upward) and the right axis (capacity and cost-efficiency, increasing downward) is the fundamental driver of all tiering and caching strategies.}
+\label{fig:storage-tiering-hierarchy}
+\end{figure}
+
 \section{Read Caching}
 Read caching intercepts read I/O requests and serves data from a faster medium when it is available, falling back to slower storage for cache misses. Effective read caching requires accurate identification of which data is likely to be re-read --- cache algorithms that promote or retain the right working set and evict data that will not be needed again.
 

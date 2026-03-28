@@ -98,6 +98,35 @@ Bind mounts are also used to satisfy chroot environments, build systems that nee
 
 \section{Overlay Mounts (overlayfs)}
 
+Figure~\ref{fig:overlayfs} illustrates the OverlayFS layer model that underpins container image storage.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.9, every node/.style={transform shape}]
+  % Merged view at top
+  \node[component dark, minimum width=5cm, minimum height=1cm] (merged) at (0, 0) {Container View\\(merged)};
+
+  % Upper and Lower layers
+  \node[component accent, minimum width=4cm, minimum height=1cm] (upper) at (-2.5,-2.2) {Upper Layer\\(writable)};
+  \node[component,       minimum width=4cm, minimum height=1cm] (lower) at ( 2.5,-2.2) {Lower Layer\\(read-only image)};
+
+  % Work directory
+  \node[component gray, minimum width=2.5cm, minimum height=0.8cm] (work) at (-5.5,-2.2) {Work Dir};
+
+  % Arrows from layers to merged
+  \draw[dataarrow] (upper.north) -- ++(0,0.5) -| (merged.south west);
+  \draw[dataarrow] (lower.north) -- ++(0,0.5) -| (merged.south east);
+
+  % Arrow from work to upper
+  \draw[dataarrow thin] (work.east) -- (upper.west) node[midway, above, smalllabel] {atomic ops};
+
+  % Labels
+  \node[smalllabel, anchor=west] at (-4.8, -3.0) {copy-up on write};
+\end{tikzpicture}
+\caption{OverlayFS layer model: upper (writable) and lower (read-only) layers merge into a unified container view.}
+\label{fig:overlayfs}
+\end{figure}
+
 \textbf{Overlayfs} is a union filesystem that merges multiple directory trees into a single coherent view. It is the filesystem driver that underpins container image layering in Docker, Podman, and virtually all OCI-compliant container runtimes. Overlayfs operates on three (or more) directory parameters:
 
 \begin{itemize}

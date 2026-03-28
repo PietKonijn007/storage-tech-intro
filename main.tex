@@ -127,6 +127,99 @@
 %% ---------------------------------------------------------------------------
 \usepackage[most]{tcolorbox}  % using patched local copy in texmf/
 
+%% ---------------------------------------------------------------------------
+%% TikZ libraries for architectural diagrams
+%% ---------------------------------------------------------------------------
+\usetikzlibrary{
+  positioning,
+  shapes.geometric,
+  shapes.multipart,
+  arrows.meta,
+  calc,
+  fit,
+  backgrounds,
+  patterns,
+  decorations.pathreplacing,
+  chains,
+}
+
+% Diagram styles — consistent with book palette
+\tikzset{
+  % Layer boxes (for stack diagrams)
+  layer/.style={
+    draw=sectionblue, fill=keyconceptbg, thick,
+    minimum width=10cm, minimum height=0.7cm,
+    font=\sffamily\small, text=darkgray,
+    rounded corners=1.5pt,
+  },
+  layer narrow/.style={
+    layer, minimum width=6cm,
+  },
+  layer narrow accent/.style={
+    layer narrow, fill=accentblue!15, draw=accentblue,
+  },
+  layer narrow dark/.style={
+    layer narrow, fill=chapterblue!12, draw=chapterblue,
+  },
+  layer accent/.style={
+    layer, fill=accentblue!15, draw=accentblue,
+  },
+  layer dark/.style={
+    layer, fill=chapterblue!12, draw=chapterblue,
+  },
+  % Component boxes
+  component/.style={
+    draw=sectionblue, fill=keyconceptbg, thick,
+    minimum width=2.2cm, minimum height=0.7cm,
+    font=\sffamily\footnotesize, text=darkgray,
+    rounded corners=2pt, align=center,
+  },
+  component accent/.style={
+    component, fill=accentblue!18, draw=accentblue,
+  },
+  component dark/.style={
+    component, fill=chapterblue!15, draw=chapterblue,
+    text=chapterblue, font=\sffamily\footnotesize\bfseries,
+  },
+  component red/.style={
+    component, fill=securitybg, draw=securityred,
+  },
+  component green/.style={
+    component, fill=green!8, draw=green!50!black,
+  },
+  component gray/.style={
+    component, fill=black!5, draw=midgray,
+  },
+  % Arrows
+  dataarrow/.style={
+    -{Stealth[length=5pt]}, thick, sectionblue,
+  },
+  dataarrow thin/.style={
+    -{Stealth[length=4pt]}, semithick, midgray,
+  },
+  biarrow/.style={
+    {Stealth[length=5pt]}-{Stealth[length=5pt]}, thick, sectionblue,
+  },
+  % Fit/grouping boxes
+  groupbox/.style={
+    draw=midgray, dashed, rounded corners=4pt,
+    inner sep=6pt, fill=black!2,
+  },
+  % Labels
+  diagramlabel/.style={
+    font=\sffamily\footnotesize\bfseries, text=chapterblue,
+  },
+  smalllabel/.style={
+    font=\sffamily\scriptsize, text=midgray,
+  },
+  % Disk/drive icons
+  disk/.style={
+    draw=midgray, fill=black!8, thick,
+    minimum width=0.8cm, minimum height=0.5cm,
+    font=\sffamily\tiny, rounded corners=1pt,
+  },
+}
+
 % Key Concept box — compact
 \newtcolorbox{keyconcept}[1][]{%
   enhanced,
@@ -301,6 +394,7 @@
 \usepackage{parskip}       % paragraph spacing instead of indent
 \setlength{\parskip}{2pt plus 1pt minus 0.5pt}
 \setlength{\parindent}{0pt}
+\newcommand{\circled}[1]{\textcircled{\scriptsize #1}} % shorthand for numbered circles
 
 % Fix for Unicode chars that may appear
 \DeclareUnicodeCharacter{2212}{--}   % minus sign

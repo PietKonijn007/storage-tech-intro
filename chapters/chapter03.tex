@@ -143,6 +143,39 @@ ReFS (Resilient File System) was introduced with Windows Server 2012, designed t
 \textbf{ReFS limitations}: ReFS does not support NTFS features including Alternate Data Streams (for integrity-stream volumes), per-file compression, disk quotas, file system encryption (EFS), hard links, and 8.3 short filenames. It cannot serve as a Windows system (boot) volume. For boot volumes and general-purpose workloads, NTFS remains the only option; ReFS is positioned specifically for high-capacity data volumes.
 
 \section{ZFS: A Deep Dive}
+Figure~\ref{fig:zfs-layers} shows the internal layer architecture of ZFS, from the POSIX interface down to physical disks.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.9, every node/.style={transform shape}]
+  % Main vertical stack
+  \node[layer narrow]                     (posix) at (0, 0)    {POSIX Interface};
+  \node[layer narrow]                     (zpl)   at (0,-1.0)  {ZPL (ZFS POSIX Layer)};
+  \node[layer narrow]                     (dmu)   at (0,-2.0)  {DMU (Data Management Unit)};
+  \node[layer narrow accent]              (spa)   at (0,-3.5)  {SPA (Storage Pool Allocator)};
+  \node[layer narrow]                     (vdev)  at (0,-4.5)  {VDEV Layer (mirror, raidz)};
+  \node[layer narrow dark]                (disks) at (0,-5.5)  {Physical Disks};
+
+  % ARC / L2ARC side branch
+  \node[component accent] (arc)   at (5.0,-2.0)  {ARC\\(DRAM Cache)};
+  \node[component]        (l2arc) at (5.0,-3.5)  {L2ARC\\(SSD Cache)};
+
+  % Main arrows
+  \draw[dataarrow] (posix.south) -- (zpl.north);
+  \draw[dataarrow] (zpl.south)   -- (dmu.north);
+  \draw[dataarrow] (dmu.south)   -- (spa.north);
+  \draw[dataarrow] (spa.south)   -- (vdev.north);
+  \draw[dataarrow] (vdev.south)  -- (disks.north);
+
+  % Side arrows for caches
+  \draw[dataarrow thin] (dmu.east) -- (arc.west) node[midway, above, smalllabel] {read};
+  \draw[dataarrow thin] (arc.south) -- (l2arc.north) node[midway, right, smalllabel] {evict};
+  \draw[dataarrow thin] (l2arc.south) |- (spa.east);
+\end{tikzpicture}
+\caption{ZFS internal layer architecture with ARC and L2ARC caching.}
+\label{fig:zfs-layers}
+\end{figure}
+
 ZFS (Zettabyte File System) originated at Sun Microsystems in 2001, designed by Jeff Bonwick and Bill Moore with the explicit goal of creating a filesystem without the failure modes of its predecessors. ZFS's design was guided by a simple principle: if the system cannot detect corruption, it will eventually serve corrupted data to applications silently. ZFS achieves this through end-to-end checksums on every block. It was open-sourced as part of OpenSolaris in 2005, ported to FreeBSD and Linux (as OpenZFS), and is now one of the most capable filesystems available on any platform. Understanding ZFS architecture is essential for any storage architect, both for direct deployment and because ZFS's design influenced every subsequent advanced filesystem.
 
 \section{Pool Architecture: vdevs and zpools}

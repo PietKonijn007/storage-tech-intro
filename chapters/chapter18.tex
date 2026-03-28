@@ -5,7 +5,85 @@ Artificial intelligence and machine learning workloads are redefining storage ar
 
 The storage requirements of AI/ML are not simply ``faster and bigger'' versions of traditional enterprise storage requirements. They are qualitatively different in several dimensions: the I/O patterns are unlike database or virtualization workloads; the relationship between GPU compute and storage throughput creates a new class of bottleneck; the data pipeline spans from raw data ingestion through curation, training, checkpointing, and inference serving, with each stage imposing distinct storage demands; and emerging hardware technologies like GPU-direct storage bypass the CPU entirely, requiring storage architectures that can feed data directly into GPU memory over RDMA fabrics.
 
-This chapter examines the AI/ML data pipeline end to end, characterizes the I/O patterns at each stage, explores the hardware and software technologies that address these patterns, reviews validated reference architectures, and addresses the governance and security dimensions of AI storage infrastructure.
+This chapter examines the AI/ML data pipeline end to end, characterizes the I/O patterns at each stage, explores the hardware and software technologies that address these patterns, reviews validated reference architectures, and addresses the governance and security dimensions of AI storage infrastructure. Figure~\ref{fig:ai-data-pipeline} illustrates the end-to-end pipeline stages with their characteristic I/O patterns, and Figure~\ref{fig:gpudirect-comparison} contrasts the traditional CPU-mediated storage path with GPUDirect Storage's DMA bypass.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.78, every node/.style={transform shape}]
+  % Pipeline stages as horizontal flow
+  \node[component gray, minimum width=2cm, minimum height=1.2cm, font=\scriptsize\bfseries,
+        text width=1.8cm, align=center] (ingest) at (0,0) {Object Store\\(raw data)};
+  \node[component, minimum width=2cm, minimum height=1.2cm, font=\scriptsize\bfseries,
+        text width=1.8cm, align=center] (curate) at (2.8,0) {Data\\Curation};
+  \node[component accent, minimum width=2cm, minimum height=1.2cm, font=\scriptsize\bfseries,
+        text width=1.8cm, align=center] (pfs) at (5.6,0) {Parallel FS\\(training)};
+  \node[component dark, minimum width=2cm, minimum height=1.2cm, font=\scriptsize\bfseries,
+        text width=1.8cm, align=center] (train) at (8.4,0) {GPU\\Training};
+  \node[component accent, minimum width=2cm, minimum height=1.2cm, font=\scriptsize\bfseries,
+        text width=1.8cm, align=center] (ckpt) at (11.2,0) {Checkpoint\\Storage};
+  \node[component, minimum width=2cm, minimum height=1.2cm, font=\scriptsize\bfseries,
+        text width=1.8cm, align=center] (registry) at (14,0) {Model\\Registry};
+  \node[component dark, minimum width=2cm, minimum height=1.2cm, font=\scriptsize\bfseries,
+        text width=1.8cm, align=center] (serve) at (16.8,0) {Inference\\Serving};
+
+  % Arrows between stages
+  \draw[dataarrow] (ingest.east) -- (curate.west);
+  \draw[dataarrow] (curate.east) -- (pfs.west);
+  \draw[dataarrow] (pfs.east) -- (train.west);
+  \draw[dataarrow] (train.east) -- (ckpt.west);
+  \draw[dataarrow] (ckpt.east) -- (registry.west);
+  \draw[dataarrow] (registry.east) -- (serve.west);
+
+  % I/O pattern labels below each stage
+  \node[smalllabel, text width=2cm, align=center, font=\tiny] at (0,-1.2) {write-heavy\\sequential};
+  \node[smalllabel, text width=2cm, align=center, font=\tiny] at (2.8,-1.2) {mixed R/W\\diverse I/O};
+  \node[smalllabel, text width=2cm, align=center, font=\tiny] at (5.6,-1.2) {read-heavy\\high BW};
+  \node[smalllabel, text width=2cm, align=center, font=\tiny] at (8.4,-1.2) {read-heavy\\random};
+  \node[smalllabel, text width=2cm, align=center, font=\tiny] at (11.2,-1.2) {bursty writes\\large sequential};
+  \node[smalllabel, text width=2cm, align=center, font=\tiny] at (14,-1.2) {write-once\\read-many};
+  \node[smalllabel, text width=2cm, align=center, font=\tiny] at (16.8,-1.2) {read-heavy\\low latency};
+\end{tikzpicture}
+\caption{End-to-end AI/ML data pipeline stages with characteristic I/O patterns at each stage, from raw data ingestion through model serving.}
+\label{fig:ai-data-pipeline}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.9, every node/.style={transform shape}]
+  % --- Left side: Traditional path ---
+  \node[diagramlabel] at (-4,3.2) {Traditional I/O Path};
+
+  \node[component dark, minimum width=2.8cm] (storL) at (-4,2) {Storage};
+  \node[component, minimum width=2.8cm] (cpuL) at (-4,0) {CPU / DRAM};
+  \node[component dark, minimum width=2.8cm] (gpuL) at (-4,-2) {GPU Memory};
+
+  \draw[dataarrow] (storL.south) -- (cpuL.north)
+    node[midway, right, font=\scriptsize] {hop 1};
+  \draw[dataarrow] (cpuL.south) -- (gpuL.north)
+    node[midway, right, font=\scriptsize] {hop 2};
+
+  % --- Right side: GPUDirect Storage path ---
+  \node[diagramlabel] at (4,3.2) {GPUDirect Storage};
+
+  \node[component dark, minimum width=2.8cm] (storR) at (4,2) {Storage};
+  % Grayed-out CPU
+  \node[component gray, minimum width=2.8cm, opacity=0.35,
+        text opacity=0.35] (cpuR) at (4,0) {CPU / DRAM};
+  \draw[dataarrow thin, opacity=0.2] (storR.south) -- (cpuR.north);
+  \draw[dataarrow thin, opacity=0.2] (cpuR.south) -- (4,-2);
+  % Strike-through line
+  \draw[securityred, line width=1.5pt] (3,-0.4) -- (5,0.4);
+
+  \node[component dark, minimum width=2.8cm] (gpuR) at (4,-2) {GPU Memory};
+
+  % Direct DMA arrow
+  \draw[dataarrow, line width=1.8pt] (storR.south east) -- (gpuR.north east)
+    node[midway, right, font=\scriptsize\bfseries, text=chapterblue] {DMA bypass};
+  \node[smalllabel] at (4,-3) {Single hop --- no CPU involvement};
+\end{tikzpicture}
+\caption{Comparison of traditional CPU-mediated storage I/O (two hops through system memory) versus GPUDirect Storage (single DMA transfer bypassing the CPU entirely).}
+\label{fig:gpudirect-comparison}
+\end{figure}
 
 \section{The AI Data Pipeline}
 

@@ -29,6 +29,78 @@ Copy-on-write (CoW) in the traditional sense --- as implemented in LVM snapshots
 
 This mechanism preserves the original data layout of the active filesystem, avoiding the fragmentation concern of redirect-on-write. However, it introduces a significant write penalty: every first write to a snapshotted block requires a read of the original block, a write of the original block to the snapshot reserve, and then the write of the new data to the original location. This three-step ``read-old, write-old, write-new'' sequence effectively triples the I/O cost of the first write to each snapshotted block. The penalty is incurred only on the first write to each block after the snapshot is taken --- subsequent writes to the same block proceed normally --- but for write-intensive workloads with broad write distributions, the cumulative overhead can be substantial.
 
+Figure~\ref{fig:cow-snapshot} illustrates the redirect-on-write snapshot mechanism, showing how the metadata tree evolves when a block is modified while a snapshot preserves the original state.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.9, every node/.style={transform shape}]
+  % === Before Write (Left Side) ===
+  \node[diagramlabel] at (-3.5, 5.2) {Before Write};
+
+  % Root
+  \node[component] (root) at (-3.5, 4) {Root};
+  % Meta
+  \node[component] (meta) at (-3.5, 2.5) {Meta};
+  % Data blocks
+  \node[component accent] (A) at (-5.5, 1) {A};
+  \node[component accent] (B) at (-3.5, 1) {B};
+  \node[component accent] (C) at (-1.5, 1) {C};
+
+  % Arrows
+  \draw[dataarrow] (root) -- (meta);
+  \draw[dataarrow] (meta) -- (A);
+  \draw[dataarrow] (meta) -- (B);
+  \draw[dataarrow] (meta) -- (C);
+
+  % Snapshot pointer
+  \node[smalllabel] at (-6.2, 4) {Snapshot};
+  \draw[dataarrow thin, ->] (-5.8, 4) -- (root.west);
+
+  % === Separator ===
+  \draw[dashed, midgray, thick] (0.5, -0.2) -- (0.5, 5.5);
+
+  % === After Write (Right Side) ===
+  \node[diagramlabel] at (4.5, 5.2) {After Write to C};
+
+  % Old tree (snapshot) — faded
+  \node[component, draw=midgray, text=darkgray] (old-root) at (2.5, 4) {Root};
+  \node[component, draw=midgray, text=darkgray] (old-meta) at (2.5, 2.5) {Meta};
+  \node[component accent] (A2) at (2.0, 1) {A};
+  \node[component accent] (B2) at (3.5, 1) {B};
+  \node[component, draw=midgray, text=darkgray] (old-C) at (5.0, 1) {C};
+
+  \draw[dataarrow thin] (old-root) -- (old-meta);
+  \draw[dataarrow thin] (old-meta) -- (A2);
+  \draw[dataarrow thin] (old-meta) -- (B2);
+  \draw[dataarrow thin] (old-meta) -- (old-C);
+
+  % Snapshot pointer to old root
+  \node[smalllabel] at (1.0, 4) {Snapshot};
+  \draw[dataarrow thin, ->] (1.5, 4) -- (old-root.west);
+
+  % New tree (active)
+  \node[component dark] (new-root) at (6.5, 4) {Root'};
+  \node[component dark] (new-meta) at (6.5, 2.5) {Meta'};
+  \node[component dark] (new-C) at (7.5, 1) {C'};
+
+  \draw[dataarrow] (new-root) -- (new-meta);
+  \draw[dataarrow] (new-meta) -- (new-C);
+
+  % Shared block references from new tree
+  \draw[dataarrow] (new-meta.south) -- ++(0,-0.3) -| (A2.north);
+  \draw[dataarrow] (new-meta.south) -- ++(0,-0.5) -| (B2.north);
+
+  % Active label
+  \node[smalllabel] at (8.2, 4) {Active};
+  \draw[dataarrow thin, ->] (7.8, 4) -- (new-root.east);
+
+  % Shared blocks annotation
+  \node[smalllabel, text width=3cm, align=center] at (2.8, -0.5) {Shared blocks (A, B)};
+\end{tikzpicture}
+\caption{Redirect-on-write snapshot mechanism. Left: before a write, the snapshot pointer and the active filesystem share the same root, metadata, and data blocks. Right: after writing block C, the active filesystem creates new blocks Root', Meta', and C' while the snapshot continues to reference the original blocks. Blocks A and B, which were not modified, are shared between both trees.}
+\label{fig:cow-snapshot}
+\end{figure}
+
 \subsection{Split-Mirror Clones}
 
 Split-mirror cloning takes an entirely different approach. The storage system maintains a synchronized mirror of the source volume. When a point-in-time copy is needed, the mirror is ``split'' --- detached from the synchronous mirroring relationship --- and presented as an independent, fully writable copy. The split-mirror clone is a complete physical copy of the data at the moment of the split, consuming the full capacity of the source volume.

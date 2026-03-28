@@ -130,6 +130,57 @@ Before CSI, Kubernetes included storage drivers for popular cloud providers and 
 \textbf{Container Storage Interface (CSI)} is a vendor-neutral specification defining a standard RPC interface between container orchestrators (Kubernetes, Mesos, Docker Swarm) and storage drivers. CSI drivers are deployed as separate Pods in the Kubernetes cluster, running alongside the Kubernetes control plane but decoupled from it. Storage vendors can release new driver versions, bug fixes, and features independently of the Kubernetes release cycle.
 
 \section{CSI Driver Architecture}
+
+Figure~\ref{fig:k8s-csi-pvpvc} illustrates the dynamic provisioning flow from a Pod's PVC request through the StorageClass and CSI driver to the underlying storage backend, showing how Kubernetes binds PVCs to dynamically provisioned PersistentVolumes.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.88, every node/.style={transform shape}]
+  % Top row: Pod and PVC
+  \node[component dark, minimum width=2.8cm, minimum height=1cm] (pod) at (-3,4.5) {Pod};
+  \node[component accent, minimum width=3.2cm, minimum height=1cm] (pvc) at (3,4.5) {PVC};
+  \node[smalllabel] at (3,3.8) {10Gi, RWO};
+
+  % Arrow Pod -> PVC
+  \draw[dataarrow] (pod.east) -- (pvc.west)
+    node[midway, above, font=\scriptsize\bfseries] {\textcircled{\scriptsize 1} mount};
+
+  % Middle row: StorageClass and CSI Driver
+  \node[component, minimum width=3.2cm, minimum height=1cm] (sc) at (-3,2.2) {StorageClass};
+  \node[smalllabel] at (-3,1.5) {trident-gold};
+  \node[component dark, minimum width=3.5cm, minimum height=1cm] (csi) at (3,2.2) {CSI Driver (Trident)};
+
+  % Arrow StorageClass -> CSI Driver
+  \draw[dataarrow] (sc.east) -- (csi.west)
+    node[midway, above, font=\scriptsize\bfseries] {\textcircled{\scriptsize 2} provision};
+
+  % Arrow PVC -> StorageClass (references)
+  \draw[dataarrow thin, dashed] (pvc.south) -- (csi.north)
+    node[midway, right, font=\scriptsize] {trigger};
+
+  % Bottom row: PV and ONTAP FlexVol
+  \node[component accent, minimum width=3.2cm, minimum height=1cm] (pv) at (-3,-0.2) {PersistentVolume};
+  \node[component dark, minimum width=3.2cm, minimum height=1cm] (ontap) at (3,-0.2) {ONTAP FlexVol};
+
+  % Arrow CSI -> ONTAP
+  \draw[dataarrow] (csi.south) -- (ontap.north)
+    node[midway, right, font=\scriptsize\bfseries] {\textcircled{\scriptsize 3} create vol};
+
+  % Arrow PV -> ONTAP
+  \draw[dataarrow thin] (pv.east) -- (ontap.west)
+    node[midway, above, font=\scriptsize] {backed by};
+
+  % Arrow PVC -> PV (bind)
+  \draw[dataarrow] (pvc.south west) -- (pv.north east)
+    node[midway, left, font=\scriptsize\bfseries] {\textcircled{\scriptsize 4} bind};
+
+  % Numbered circle helper
+  % (using a simple approach with circled numbers in text)
+\end{tikzpicture}
+\caption{Kubernetes CSI dynamic provisioning flow: (1) a Pod mounts a PVC, (2) the StorageClass triggers the CSI driver to provision storage, (3) the CSI driver creates a volume on the ONTAP backend, and (4) Kubernetes binds the PVC to the resulting PersistentVolume.}
+\label{fig:k8s-csi-pvpvc}
+\end{figure}
+
 A CSI driver consists of two components:
 
 \textbf{Controller Plugin} runs as a Deployment (typically one or a small number of replicas for HA) in a privileged namespace. It handles cluster-scoped operations: volume creation and deletion, volume snapshots, volume attachment/detachment to nodes, and volume expansion. The Controller Plugin communicates with the storage backend's API (AWS, Azure, Ceph, etc.) to perform these operations. Kubernetes's external-provisioner, external-attacher, external-snapshotter, and external-resizer sidecar containers run alongside the Controller Plugin, watching Kubernetes API objects and calling the appropriate CSI RPC methods.

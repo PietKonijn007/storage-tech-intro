@@ -53,6 +53,89 @@ RAID 10 inherits the rebuild simplicity of RAID 1 --- a failed drive triggers a 
 
 The cost is a 50\% capacity overhead, regardless of the number of drives. RAID 10 is the preferred configuration for write-intensive, latency-sensitive workloads --- database transaction logs, OLTP data files, virtualization storage --- where the write penalty of parity-based RAID is unacceptable and the capacity cost is justified by performance requirements. It also tolerates multiple simultaneous failures as long as no mirror pair loses both members.
 
+Figure~\ref{fig:raid-levels} provides a visual comparison of the data and parity distribution across drives for each standard RAID level.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.72, every node/.style={transform shape},
+  cell/.style={minimum width=0.9cm, minimum height=0.55cm, draw, inner sep=0pt, font=\tiny\bfseries},
+  dcell/.style={cell, fill=chapterblue!15},
+  pcell/.style={cell, fill=accentblue!30},
+  mcell/.style={cell, fill=chapterblue!35},
+  rlabel/.style={font=\scriptsize\bfseries, anchor=south}]
+
+  % ---- RAID 0 ----
+  \begin{scope}[shift={(0,0)}]
+    \node[rlabel] at (0.9, 2.7) {RAID 0};
+    \foreach \c in {0,...,3} {
+      \node[smalllabel] at (\c*1.0, 2.3) {D\the\numexpr\c\relax};
+    }
+    \node[dcell] at (0,1.65) {A1}; \node[dcell] at (1,1.65) {A2}; \node[dcell] at (2,1.65) {A3}; \node[dcell] at (3,1.65) {A4};
+    \node[dcell] at (0,1.05) {B1}; \node[dcell] at (1,1.05) {B2}; \node[dcell] at (2,1.05) {B3}; \node[dcell] at (3,1.05) {B4};
+    \node[dcell] at (0,0.45) {C1}; \node[dcell] at (1,0.45) {C2}; \node[dcell] at (2,0.45) {C3}; \node[dcell] at (3,0.45) {C4};
+  \end{scope}
+
+  % ---- RAID 1 ----
+  \begin{scope}[shift={(5,0)}]
+    \node[rlabel] at (0.5, 2.7) {RAID 1};
+    \foreach \c in {0,1} {
+      \node[smalllabel] at (\c*1.0, 2.3) {D\the\numexpr\c\relax};
+    }
+    \node[dcell] at (0,1.65) {A1}; \node[mcell] at (1,1.65) {A1};
+    \node[dcell] at (0,1.05) {B1}; \node[mcell] at (1,1.05) {B1};
+    \node[dcell] at (0,0.45) {C1}; \node[mcell] at (1,0.45) {C1};
+  \end{scope}
+
+  % ---- RAID 5 ----
+  \begin{scope}[shift={(8.5,0)}]
+    \node[rlabel] at (1.0, 2.7) {RAID 5};
+    \foreach \c in {0,...,3} {
+      \node[smalllabel] at (\c*1.0, 2.3) {D\the\numexpr\c\relax};
+    }
+    \node[dcell] at (0,1.65) {A1}; \node[dcell] at (1,1.65) {A2}; \node[dcell] at (2,1.65) {A3}; \node[pcell] at (3,1.65) {Ap};
+    \node[dcell] at (0,1.05) {B1}; \node[dcell] at (1,1.05) {B2}; \node[pcell] at (2,1.05) {Bp}; \node[dcell] at (3,1.05) {B3};
+    \node[dcell] at (0,0.45) {C1}; \node[pcell] at (1,0.45) {Cp}; \node[dcell] at (2,0.45) {C2}; \node[dcell] at (3,0.45) {C3};
+  \end{scope}
+
+  % ---- RAID 6 ----
+  \begin{scope}[shift={(0,-3.8)}]
+    \node[rlabel] at (1.5, 2.7) {RAID 6};
+    \foreach \c in {0,...,4} {
+      \node[smalllabel] at (\c*1.0, 2.3) {D\the\numexpr\c\relax};
+    }
+    \node[dcell] at (0,1.65) {A1}; \node[dcell] at (1,1.65) {A2}; \node[dcell] at (2,1.65) {A3}; \node[pcell] at (3,1.65) {Ap}; \node[pcell] at (4,1.65) {Aq};
+    \node[dcell] at (0,1.05) {B1}; \node[dcell] at (1,1.05) {B2}; \node[pcell] at (2,1.05) {Bp}; \node[pcell] at (3,1.05) {Bq}; \node[dcell] at (4,1.05) {B3};
+    \node[dcell] at (0,0.45) {C1}; \node[pcell] at (1,0.45) {Cp}; \node[pcell] at (2,0.45) {Cq}; \node[dcell] at (3,0.45) {C2}; \node[dcell] at (4,0.45) {C3};
+  \end{scope}
+
+  % ---- RAID 10 ----
+  \begin{scope}[shift={(7,-3.8)}]
+    \node[rlabel] at (1.5, 2.7) {RAID 10};
+    \foreach \c in {0,...,3} {
+      \node[smalllabel] at (\c*1.0, 2.3) {D\the\numexpr\c\relax};
+    }
+    \node[dcell] at (0,1.65) {A1}; \node[mcell] at (1,1.65) {A1}; \node[dcell] at (2,1.65) {A2}; \node[mcell] at (3,1.65) {A2};
+    \node[dcell] at (0,1.05) {B1}; \node[mcell] at (1,1.05) {B1}; \node[dcell] at (2,1.05) {B2}; \node[mcell] at (3,1.05) {B2};
+    \node[dcell] at (0,0.45) {C1}; \node[mcell] at (1,0.45) {C1}; \node[dcell] at (2,0.45) {C2}; \node[mcell] at (3,0.45) {C2};
+    % Group boxes for mirror pairs
+    \draw[dashed, midgray] (-0.55,0.1) rectangle (1.55,2.0);
+    \draw[dashed, midgray] (1.45,0.1) rectangle (3.55,2.0);
+    \node[smalllabel] at (0.5,0.0) {Mirror 1};
+    \node[smalllabel] at (2.5,0.0) {Mirror 2};
+  \end{scope}
+
+  % Legend
+  \node[dcell, anchor=west] at (0,-5.0) {};
+  \node[smalllabel, anchor=west] at (0.6,-5.0) {Data};
+  \node[pcell, anchor=west] at (2.0,-5.0) {};
+  \node[smalllabel, anchor=west] at (2.6,-5.0) {Parity};
+  \node[mcell, anchor=west] at (4.0,-5.0) {};
+  \node[smalllabel, anchor=west] at (4.6,-5.0) {Mirror copy};
+\end{tikzpicture}
+\caption{RAID levels 0, 1, 5, 6, and 10: data and parity distribution across drives.}
+\label{fig:raid-levels}
+\end{figure}
+
 \section{Summary of RAID Level Trade-offs}
 \begin{longtable}[]{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 10\tabcolsep) * \real{0.1667}}
@@ -166,6 +249,61 @@ Common configurations in enterprise and cloud object storage include:
   \item RS(14, 10) or RS(16, 10): 4 parity chunks, tolerating 4 simultaneous failures --- used in large object storage at hyperscale
   \item RS(12, 6): 6 parity chunks for 6 data, 100\% overhead but tolerating 6 failures --- used in very high durability requirements
 \end{itemize}
+
+Figure~\ref{fig:ec-vs-replication} contrasts three-way replication with RS(4,2) erasure coding, highlighting the significant difference in storage overhead.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.85, every node/.style={transform shape},
+  nd/.style={component, minimum width=1.3cm, minimum height=1.1cm, font=\scriptsize},
+  ndp/.style={component accent, minimum width=1.3cm, minimum height=1.1cm, font=\scriptsize}]
+
+  % --- Left: 3x Replication ---
+  \node[diagramlabel] at (-4.0, 2.0) {3x Replication};
+
+  % Source block
+  \node[component dark, minimum width=1.5cm, minimum height=0.9cm] (src) at (-4.0, 0.8) {Data};
+
+  % 3 replica nodes
+  \node[nd] (r1) at (-6.0,-0.8) {Node 1\\Copy};
+  \node[nd] (r2) at (-4.0,-0.8) {Node 2\\Copy};
+  \node[nd] (r3) at (-2.0,-0.8) {Node 3\\Copy};
+
+  \draw[dataarrow thin] (src.south) -- ++(0,-0.3) -| (r1.north);
+  \draw[dataarrow thin] (src.south) -- (r2.north);
+  \draw[dataarrow thin] (src.south) -- ++(0,-0.3) -| (r3.north);
+
+  \node[smalllabel] at (-4.0,-1.8) {200\% overhead};
+
+  % --- Right: RS(4,2) Erasure Coding ---
+  \node[diagramlabel] at (4.5, 2.0) {RS(4,2) Erasure Coding};
+
+  % Source
+  \node[component dark, minimum width=1.5cm, minimum height=0.9cm] (src2) at (4.5, 0.8) {Data};
+
+  % 4 data + 2 parity nodes
+  \node[nd]  (d1) at (1.5,-0.8) {D1};
+  \node[nd]  (d2) at (2.9,-0.8) {D2};
+  \node[nd]  (d3) at (4.3,-0.8) {D3};
+  \node[nd]  (d4) at (5.7,-0.8) {D4};
+  \node[ndp] (p1) at (7.1,-0.8) {P1};
+  \node[ndp] (p2) at (8.5,-0.8) {P2};
+
+  \draw[dataarrow thin] (src2.south) -- ++(0,-0.3) -| (d1.north);
+  \draw[dataarrow thin] (src2.south) -- ++(0,-0.2) -| (d2.north);
+  \draw[dataarrow thin] (src2.south) -- ++(0,-0.2) -| (d3.north);
+  \draw[dataarrow thin] (src2.south) -- ++(0,-0.3) -| (d4.north);
+  \draw[dataarrow thin] (src2.south) -- ++(0,-0.3) -| (p1.north);
+  \draw[dataarrow thin] (src2.south) -- ++(0,-0.3) -| (p2.north);
+
+  \node[smalllabel] at (4.5,-1.8) {50\% overhead};
+
+  % Divider
+  \draw[dashed, midgray] (0, 2.5) -- (0,-2.2);
+\end{tikzpicture}
+\caption{Storage overhead comparison: 3x replication (200\% overhead) versus RS(4,2) erasure coding (50\% overhead).}
+\label{fig:ec-vs-replication}
+\end{figure}
 
 \section{Erasure Coding in Object Storage Systems}
 Modern object storage systems use erasure coding as their primary durability mechanism. Ceph, for example, allows configuring EC pools with arbitrary k and m parameters, distributing chunks across OSDs according to its CRUSH placement map. Amazon S3 uses Reed-Solomon coding to achieve the claimed 11 nines of annual durability (99.999999999\%). Azure Blob Storage, Google Cloud Storage, and all major cloud object stores use erasure coding across multiple storage nodes and availability zones.

@@ -68,6 +68,44 @@ BeeGFS's key differentiator from Lustre and GPFS is its \textbf{ease of deployme
 BeeGFS provides an optional high-availability layer through buddy mirroring: metadata and data targets can be paired, with changes synchronously mirrored between the pair. If one target fails, its buddy continues serving data. This provides resilience without the complexity of external replication management.
 
 \section{Software-Defined Storage: Ceph}
+Figure~\ref{fig:ceph-rados} shows the Ceph RADOS data path from client to OSD replicas via placement groups and the CRUSH algorithm.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.85, every node/.style={transform shape}]
+  % Client
+  \node[component dark] (client) at (0,0) {Client};
+
+  % librados
+  \node[component] (librados) at (2.8,0) {librados};
+
+  % hash
+  \node[component accent, minimum width=1.8cm] (hash) at (5.4,0) {hash(obj)};
+
+  % PG
+  \node[component, minimum width=1.6cm] (pg) at (7.8,0) {PG};
+
+  % CRUSH
+  \node[component accent, minimum width=1.8cm] (crush) at (10.2,0) {CRUSH\\map};
+
+  % OSDs
+  \node[component green, minimum width=1.6cm] (osd1) at (13.0, 1.0) {OSD.1\\{\tiny primary}};
+  \node[component gray,  minimum width=1.6cm] (osd2) at (13.0, 0.0) {OSD.2\\{\tiny replica}};
+  \node[component gray,  minimum width=1.6cm] (osd3) at (13.0,-1.0) {OSD.3\\{\tiny replica}};
+
+  % Arrows
+  \draw[dataarrow] (client.east) -- (librados.west);
+  \draw[dataarrow] (librados.east) -- (hash.west);
+  \draw[dataarrow] (hash.east) -- (pg.west);
+  \draw[dataarrow] (pg.east) -- (crush.west);
+  \draw[dataarrow] (crush.east) -- ++(0.5,0) |- (osd1.west);
+  \draw[dataarrow thin] (crush.east) -- ++(0.5,0) |- (osd2.west);
+  \draw[dataarrow thin] (crush.east) -- ++(0.5,0) |- (osd3.west);
+\end{tikzpicture}
+\caption{Ceph RADOS data path: object hashing, placement group mapping, and CRUSH-based OSD selection.}
+\label{fig:ceph-rados}
+\end{figure}
+
 Ceph is arguably the most architecturally significant distributed storage system of the past fifteen years, representing a complete reimagining of how storage should work at scale. Developed by Sage Weil for his doctoral dissertation at UC Santa Cruz and subsequently commercialized through Inktank (later acquired by Red Hat), Ceph provides block storage, file storage, and object storage from a single unified storage cluster, all built atop a common distributed object store called RADOS.
 
 \section{RADOS: The Reliable Autonomic Distributed Object Store}

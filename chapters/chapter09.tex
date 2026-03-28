@@ -38,6 +38,55 @@ The core object operations are:
 
 \textbf{Presigned URLs} allow time-limited access to specific objects without requiring the requester to have AWS credentials. The URL encodes the object path, the expiration time, and a cryptographic signature derived from the requesting principal's credentials. Anyone with the URL can GET (or PUT, for write presigned URLs) the object until the URL expires. This mechanism is widely used for temporary sharing, direct browser-to-S3 file uploads, and CDN integration.
 
+Figure~\ref{fig:s3-request-flow} illustrates the end-to-end request flow for an S3 PUT operation, showing how the request traverses from the client through the load balancing, metadata, and storage layers of a typical S3-compatible object storage system.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.85, every node/.style={transform shape}]
+  % Client
+  \node[component] (client) at (0, 0) {Client};
+
+  % HTTPS label
+  \node[smalllabel] at (1.8, 0.5) {\texttt{PUT /bucket/key}};
+  \node[smalllabel] at (1.8, -0.3) {HTTPS};
+
+  % Load Balancer
+  \node[component accent] (lb) at (3.5, 0) {Load Balancer};
+
+  % S3 Frontend
+  \node[component accent] (fe) at (6.5, 0) {S3 Frontend};
+
+  % Metadata Index
+  \node[component dark] (meta) at (9.5, 1.2) {\small Metadata Index};
+  \node[smalllabel] at (9.5, 0.5) {key $\rightarrow$ location};
+
+  % Storage Backend
+  \node[component dark] (store) at (9.5, -1.2) {\small Storage Backend};
+
+  % Erasure-coded nodes
+  \node[disk] (n1) at (12, -0.3) {\tiny Node 1};
+  \node[disk] (n2) at (12, -1.2) {\tiny Node 2};
+  \node[disk] (n3) at (12, -2.1) {\tiny Node 3};
+
+  % Groupbox around nodes
+  \node[groupbox, fit=(n1)(n3), inner sep=4pt, label={[smalllabel]above:{\small Erasure-coded}}] {};
+
+  % Arrows
+  \draw[dataarrow] (client) -- (lb);
+  \draw[dataarrow] (lb) -- (fe);
+  \draw[dataarrow] (fe) -- (meta);
+  \draw[dataarrow] (fe) -- (store);
+  \draw[dataarrow thin] (store) -- (n1);
+  \draw[dataarrow thin] (store) -- (n2);
+  \draw[dataarrow thin] (store) -- (n3);
+
+  % Bidirectional metadata lookup
+  \draw[dataarrow thin, <->] (meta) -- (store);
+\end{tikzpicture}
+\caption{S3 object storage request flow for a PUT operation. The client sends an HTTPS request to the load balancer, which routes it to an S3 frontend service. The frontend records the object key and location in the metadata index and writes the object data to the storage backend, where it is erasure-coded across multiple storage nodes for durability.}
+\label{fig:s3-request-flow}
+\end{figure}
+
 \section{Consistency Model Evolution}
 Early S3 (and most early object storage systems) implemented \textbf{eventual consistency} for reads after writes and reads after deletes. After writing an object, a subsequent read might return the old version or a 404 until the write propagated to all replicas. After deleting an object, a subsequent read might still return the old data. This model simplified the distributed system design but created subtle application-level bugs.
 

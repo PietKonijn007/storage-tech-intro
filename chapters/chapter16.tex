@@ -15,6 +15,50 @@ The Data Fabric is an architectural concept --- not a single product --- that de
 
 Consistency of data services is the critical differentiator from simply ``using cloud storage.'' An organization that stores data on Amazon S3 and separately on Azure Blob Storage has two disconnected storage silos with different APIs, different snapshot mechanisms, different replication semantics, and different security models. A Data Fabric architecture provides a single operational model: one replication engine (SnapMirror), one tiering mechanism (FabricPool), one classification and compliance tool (BlueXP classification), and one control plane (BlueXP) that operates across all locations. The operational benefit is that storage administrators do not need to learn and operate N different toolsets for N different clouds --- they operate one toolset that abstracts the underlying infrastructure.
 
+Figure~\ref{fig:data-fabric-bluexp} illustrates the Data Fabric topology with BlueXP as the central control plane connecting on-premises and multi-cloud ONTAP instances through SnapMirror replication and FabricPool tiering.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=0.85, every node/.style={transform shape}]
+  % Center: BlueXP
+  \node[component dark, minimum width=3cm, minimum height=1.2cm,
+        font=\bfseries] (bluexp) at (0,0) {BlueXP};
+
+  % Surrounding nodes in a ring
+  % Top-left: On-Prem ONTAP
+  \node[component, minimum width=3cm] (onprem) at (-4.5,3.5) {On-Prem ONTAP};
+  % Top-right: CVO AWS
+  \node[component accent, minimum width=3.2cm] (cvo) at (4.5,3.5) {CVO (AWS)};
+  % Right: FSx for ONTAP
+  \node[component accent, minimum width=3.2cm] (fsx) at (5.5,0) {FSx for ONTAP};
+  % Bottom-right: ANF
+  \node[component green, minimum width=3.5cm] (anf) at (3.5,-3.5) {Azure NetApp Files};
+  % Bottom-left: StorageGRID
+  \node[component gray, minimum width=3.2cm] (sgrid) at (-4,-3.5) {StorageGRID (S3)};
+
+  % Arrows from BlueXP to each endpoint
+  \draw[dataarrow thin] (bluexp) -- (onprem);
+  \draw[dataarrow thin] (bluexp) -- (cvo);
+  \draw[dataarrow thin] (bluexp) -- (fsx);
+  \draw[dataarrow thin] (bluexp) -- (anf);
+  \draw[dataarrow thin] (bluexp) -- (sgrid);
+
+  % SnapMirror replication arrows between ONTAP instances
+  \draw[biarrow] (onprem.east) -- (cvo.west)
+    node[midway, above, font=\scriptsize\bfseries, text=chapterblue] {SnapMirror};
+  \draw[biarrow] (onprem.south east) -- (anf.north west)
+    node[midway, left, font=\scriptsize\bfseries, text=chapterblue, rotate=35] {SnapMirror};
+  \draw[biarrow] (cvo.south) -- (fsx.north)
+    node[midway, right, font=\scriptsize\bfseries, text=chapterblue] {SnapMirror};
+
+  % FabricPool arrow from On-Prem to StorageGRID
+  \draw[dataarrow, chapterblue] (onprem.south) -- (sgrid.north)
+    node[midway, left, font=\scriptsize\bfseries, text=sectionblue] {FabricPool};
+\end{tikzpicture}
+\caption{Data Fabric topology with BlueXP as the unified control plane. SnapMirror provides data mobility between ONTAP instances across on-premises and cloud environments, while FabricPool enables capacity tiering to object storage.}
+\label{fig:data-fabric-bluexp}
+\end{figure}
+
 NetApp's implementation of the Data Fabric rests on a simple but powerful architectural choice: run ONTAP everywhere. ONTAP is the common data plane. Whether it runs on purpose-built AFF/FAS hardware, as a software-defined instance on cloud VMs (Cloud Volumes ONTAP), as a first-party managed service (Azure NetApp Files, Amazon FSx for NetApp ONTAP), or as a NetApp-managed service (Google Cloud NetApp Volumes), the data services are consistent because the underlying storage operating system is consistent. SnapMirror between an on-premises AFF and a Cloud Volumes ONTAP instance in AWS works because both endpoints speak the same replication protocol. FabricPool on Cloud Volumes ONTAP works identically to FabricPool on-premises. This consistency-through-common-platform approach is architecturally distinct from approaches that attempt to unify heterogeneous storage backends through an abstraction layer --- the latter must translate between fundamentally different semantics, which introduces impedance mismatches and feature gaps.
 
 \section{BlueXP: The Unified Control Plane}
